@@ -1,0 +1,7 @@
+# build output (build.ps1)
+/build/
+
+# server
+/server/node_modules/
+/server/data/
+*.log
