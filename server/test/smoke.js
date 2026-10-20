@@ -1,15 +1,22 @@
 #!/usr/bin/env node
-// End-to-end smoke test: starts server.js on a free port and drives it with
-// fake clients over real TCP. Run: npm test  (or node test/smoke.js)
+// End-to-end smoke test: starts server.js on free ports and drives it with
+// fake clients over real WebSockets (Node's global WebSocket, Node >= 22).
+// A second instance runs with a throwaway self-signed certificate to check
+// https/wss (skipped when the openssl CLI is missing).
+// Run: npm test  (or node test/smoke.js)
 
 'use strict';
 
 const net = require('net');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const assert = require('assert');
 
-const ENGINE = 'testcommit/pvp1/proto1';
+const PROTO = 2;
+const PASSWORD = 'pika-pika';
+const ENGINE = 'testcommit/pvp1/proto2';
 const PARTY = [
   { dex: 25, level: 40, moves: [84, 85, 86, 87], gender: 'male', ivs: { hp: 15, atk: 15, def: 15, spAtk: 15, spDef: 15, spe: 15 } },
   { dex: 6, level: 40, moves: [52, 53], gender: 'female' },
@@ -23,27 +30,23 @@ function freePort() {
 }
 
 class Fake {
-  constructor(port, label) {
+  constructor(url, label) {
     this.label = label;
     this.inbox = [];
     this.waiters = [];
-    this.sock = net.connect(port, '127.0.0.1');
-    this.sock.setEncoding('utf8');
-    let buf = '';
-    this.closed = new Promise((r) => this.sock.on('close', r));
-    this.sock.on('data', (d) => {
-      buf += d;
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const msg = JSON.parse(buf.slice(0, nl));
-        buf = buf.slice(nl + 1);
-        this.inbox.push(msg);
-        this.flush();
-      }
+    this.ws = new WebSocket(url);
+    this.closed = new Promise((r) => this.ws.addEventListener('close', () => r()));
+    this.opened = new Promise((resolve, reject) => {
+      this.ws.addEventListener('open', () => resolve());
+      this.ws.addEventListener('error', (e) => reject(new Error(`${label}: ${e.message || 'websocket error'}`)));
+    });
+    this.ws.addEventListener('message', (ev) => {
+      this.inbox.push(JSON.parse(ev.data));
+      this.flush();
     });
   }
-  ready() { return new Promise((r) => this.sock.once('connect', r)); }
-  send(o) { this.sock.write(JSON.stringify(o) + '\n'); }
+  ready() { return this.opened; }
+  send(o) { this.ws.send(JSON.stringify(o)); }
   flush() {
     for (const w of [...this.waiters]) {
       const i = this.inbox.findIndex(w.pred);
@@ -74,13 +77,15 @@ class Fake {
       if (pred(m)) return m;
     }
   }
-  close() { this.sock.end(); }
+  close() { this.ws.close(); }
 }
 
-async function join(port, name, { engine = ENGINE, party = PARTY } = {}) {
-  const c = new Fake(port, name);
+let URL_BASE;   // ws://127.0.0.1:<port>
+
+async function join(port, name, { engine = ENGINE, party = PARTY, password = PASSWORD, base = URL_BASE } = {}) {
+  const c = new Fake(`${base}/ws`, name);
   await c.ready();
-  c.send({ t: 'hello', proto: 1, name, engine, client: 'smoke', party });
+  c.send({ t: 'hello', proto: PROTO, password, name, engine, client: 'smoke', party });
   const w = await c.next('welcome');
   c.id = w.id;
   c.name = w.name;
@@ -94,15 +99,43 @@ async function step(name, fn) {
   console.log(`  PASS  ${name}`);
 }
 
-(async () => {
-  const port = await freePort();
+function startServer(port, extraEnv) {
   const srv = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', CHALLENGE_TIMEOUT_MS: '700', RESULTS_FILE: '' },
+    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', CHALLENGE_TIMEOUT_MS: '700',
+           RESULTS_FILE: '', SERVER_PASSWORD: PASSWORD, ...extraEnv },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
-  let srvOut = '';
-  srv.stdout.on('data', (d) => { srvOut += d; });
-  await new Promise((r) => { const t = setInterval(() => { if (srvOut.includes('listening')) { clearInterval(t); r(); } }, 20); });
+  srv.out = '';
+  srv.stdout.on('data', (d) => { srv.out += d; });
+  return new Promise((resolve, reject) => {
+    const t = setInterval(() => {
+      if (srv.out.includes('listening')) { clearInterval(t); resolve(srv); }
+      if (srv.exitCode !== null) { clearInterval(t); reject(new Error('server exited: ' + srv.out)); }
+    }, 20);
+  });
+}
+
+/** Throwaway self-signed cert for 127.0.0.1, or null without openssl. */
+function makeCert() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pmf-cert-'));
+  const cert = path.join(dir, 'cert.pem');
+  const key = path.join(dir, 'key.pem');
+  try {
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+      '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=127.0.0.1',
+      '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
+    return { dir, cert, key };
+  } catch {
+    return null;
+  }
+}
+
+(async () => {
+  const port = await freePort();
+  URL_BASE = `ws://127.0.0.1:${port}`;
+  const srv = await startServer(port, {});
+  let tlsSrv = null;
+  let certInfo = null;
 
   try {
     let alice, bob, carol;
@@ -127,9 +160,10 @@ async function step(name, fn) {
     });
 
     await step('bad hello is rejected', async () => {
-      const bad = new Fake(port, 'bad');
+      const bad = new Fake(`${URL_BASE}/ws`, 'bad');
       await bad.ready();
-      bad.send({ t: 'hello', proto: 1, name: 'x', engine: ENGINE, party: [{ dex: 999, level: 5, moves: [] }] });
+      bad.send({ t: 'hello', proto: PROTO, password: PASSWORD, name: 'x', engine: ENGINE,
+                 party: [{ dex: 999, level: 5, moves: [] }] });
       const e = await bad.next('error');
       assert.strictEqual(e.code, 'party');
       await bad.closed;
@@ -253,9 +287,10 @@ async function step(name, fn) {
     });
 
     await step('practice bot: compatible with any engine, no cross-check', async () => {
-      const bot = new Fake(port, 'bot');
+      const bot = new Fake(`${URL_BASE}/ws`, 'bot');
       await bot.ready();
-      bot.send({ t: 'hello', proto: 1, name: 'Bot', engine: 'bot', client: 'bot', bot: true, party: PARTY });
+      bot.send({ t: 'hello', proto: PROTO, password: PASSWORD, name: 'Bot', engine: 'bot', client: 'bot',
+                 bot: true, party: PARTY });
       bot.id = (await bot.next('welcome')).id;
       const l = await alice.lobby((m) => m.users.some((u) => u.id === bot.id));
       const u = l.users.find((x) => x.id === bot.id);
@@ -281,15 +316,74 @@ async function step(name, fn) {
       assert.strictEqual((await alice.next('error')).code, 'unknown');
     });
 
+    await step('wrong or missing password is rejected and closed', async () => {
+      for (const password of ['nope', undefined]) {
+        const intruder = new Fake(`${URL_BASE}/ws`, 'intruder');
+        await intruder.ready();
+        intruder.send({ t: 'hello', proto: PROTO, password, name: 'intruder', engine: ENGINE, party: PARTY });
+        assert.strictEqual((await intruder.next('error')).code, 'password');
+        await intruder.closed;
+      }
+      const l = await alice.lobby();
+      assert.ok(!l.users.some((u) => u.name === 'intruder'));
+    });
+
+    await step('old protocol is rejected', async () => {
+      const old = new Fake(`${URL_BASE}/ws`, 'v1');
+      await old.ready();
+      old.send({ t: 'hello', proto: 1, password: PASSWORD, name: 'v1', engine: ENGINE, party: PARTY });
+      assert.strictEqual((await old.next('error')).code, 'protocol');
+      await old.closed;
+    });
+
+    await step('status page over http', async () => {
+      const r = await fetch(`http://127.0.0.1:${port}/`);
+      const j = await r.json();
+      assert.strictEqual(j.proto, PROTO);
+      assert.strictEqual(j.password, true);
+      assert.ok(j.online >= 2);
+      assert.strictEqual(await (await fetch(`http://127.0.0.1:${port}/health`)).text(), 'ok');
+      assert.strictEqual((await fetch(`http://127.0.0.1:${port}/nope`)).status, 404);
+    });
+
+    certInfo = makeCert();
+    if (certInfo) {
+      await step('https + wss with a TLS certificate', async () => {
+        const tlsPort = await freePort();
+        tlsSrv = await startServer(tlsPort, { TLS_CERT: certInfo.cert, TLS_KEY: certInfo.key });
+        assert.ok(tlsSrv.out.includes('https/wss'));
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';   // throwaway self-signed cert
+        const j = await (await fetch(`https://127.0.0.1:${tlsPort}/`)).json();
+        assert.strictEqual(j.proto, PROTO);
+        const t1 = await join(tlsPort, 'TlsA', { base: `wss://127.0.0.1:${tlsPort}` });
+        const t2 = await join(tlsPort, 'TlsB', { base: `wss://127.0.0.1:${tlsPort}` });
+        await t1.lobby((m) => m.users.some((u) => u.id === t2.id));
+        t1.send({ t: 'challenge', to: t2.id });
+        await t2.next('challenged');
+        t2.send({ t: 'respond', from: t1.id, accept: true });
+        const sa = await t1.next('battleStart');
+        const sb = await t2.next('battleStart');
+        assert.strictEqual(sa.seed, sb.seed);
+        t1.close(); t2.close();
+        await Promise.all([t1.closed, t2.closed]);
+      });
+    } else {
+      console.log('  SKIP  https + wss (openssl not found)');
+    }
+
     alice.close();
     bob.close();
     console.log(`\nALL ${passed} PASS`);
     srv.kill('SIGTERM');
+    if (tlsSrv) tlsSrv.kill('SIGTERM');
+    if (certInfo) fs.rmSync(certInfo.dir, { recursive: true, force: true });
     process.exit(0);
   } catch (e) {
     console.error('\nFAIL:', e.message);
-    console.error('--- server log ---\n' + srvOut);
+    console.error('--- server log ---\n' + srv.out + (tlsSrv ? '\n--- tls server log ---\n' + tlsSrv.out : ''));
     srv.kill('SIGKILL');
+    if (tlsSrv) tlsSrv.kill('SIGKILL');
+    if (certInfo) fs.rmSync(certInfo.dir, { recursive: true, force: true });
     process.exit(1);
   }
 })();

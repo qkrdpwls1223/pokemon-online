@@ -1,15 +1,16 @@
 {
   "name": "pmf-battle-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lobby/relay server for pmf-battle (online battles for Pokemon Mouse Follower)",
   "private": true,
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/smoke.js"
+    "test": "node test/smoke.js",
+    "bot": "node tools/bot.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "license": "UNLICENSED"
 }

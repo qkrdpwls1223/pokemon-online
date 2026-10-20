@@ -19,6 +19,32 @@ enum Selftest {
         return "\(battle.digest) winner=\(battle.winner?.rawValue ?? "draw") rounds=\(battle.rounds)"
     }
 
+    /// `--probe URL`: open the WebSocket, send a ping, print the first reply.
+    /// Exercises TLS/proxy/upgrade without the GUI (dev build: console).
+    static func probe(_ urlText: String) -> Int32 {
+        guard let addr = ServerAddress(urlText) else { print("invalid url: \(urlText)"); return 2 }
+        print("probe \(addr.display)\(addr.path)")
+        let ws = WebSocketConnection()
+        do { try ws.connect(to: addr) } catch { print("CONNECT FAILED: \(error)"); return 1 }
+        print("connected (HTTP 101 upgrade OK)")
+        let done = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var first: String?
+        ws.onMessage = { text in
+            lock.lock(); let isFirst = first == nil; if isFirst { first = text }; lock.unlock()
+            if isFirst { done.signal() }
+        }
+        ws.onClose = { reason in print("closed: \(reason ?? "by us")"); done.signal() }
+        Thread.detachNewThread { ws.runReceiveLoop() }
+        ws.send(text: #"{"t":"ping"}"#)
+        _ = done.wait(timeout: .now() + 5)
+        lock.lock(); let reply = first; lock.unlock()
+        print("first message: \(reply ?? "(none)")")
+        ws.close()
+        Thread.sleep(forTimeInterval: 0.3)
+        return reply != nil ? 0 : 1
+    }
+
     static func run() -> Bool {
         var ok = true
         func check(_ cond: Bool, _ what: String) {

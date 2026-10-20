@@ -1,0 +1,43 @@
+# pmf-battle relay server: https/wss on HOST_PORT (default 7777).
+#   1) certs/cert.pem, certs/key.pem 준비 (certs/README.md)
+#   2) cp .env.example .env, SERVER_PASSWORD 등 설정
+#   3) mkdir -p data && docker compose up -d --build
+#   연습 봇까지:  docker compose --profile bot up -d --build
+services:
+  pmf-battle:
+    build: .
+    image: pmf-battle-server:latest
+    container_name: pmf-battle
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${HOST_PORT:-7777}:7777"
+    environment:
+      PORT: "7777"
+      TLS_CERT: /certs/cert.pem
+      TLS_KEY: /certs/key.pem
+      SERVER_PASSWORD: ${SERVER_PASSWORD:?set SERVER_PASSWORD in .env}
+      RESULTS_FILE: /app/data/results.jsonl
+    volumes:
+      - ./certs:/certs:ro
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(7777,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Practice bot (optional). It reaches the server over the compose network,
+  # where the certificate's IP does not match the host name, hence --insecure.
+  bot:
+    profiles: ["bot"]
+    build: .
+    image: pmf-battle-server:latest
+    container_name: pmf-battle-bot
+    restart: unless-stopped
+    depends_on:
+      pmf-battle:
+        condition: service_healthy
+    environment:
+      SERVER_PASSWORD: ${SERVER_PASSWORD}
+    command: ["node", "tools/bot.js", "wss://pmf-battle:7777", "연습봇", "--insecure"]

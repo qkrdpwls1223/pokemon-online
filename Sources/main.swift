@@ -2,6 +2,7 @@
 //   pmf-battle.exe                  GUI (lobby + battles)
 //   pmf-battle.exe --selftest       headless checks (use the dev build: console)
 //   pmf-battle.exe --simulate SEED  print one sample battle's digest
+//   pmf-battle.exe --probe URL      WebSocket connectivity check (TLS, proxy, upgrade)
 
 import WinSDK
 import Foundation
@@ -10,6 +11,9 @@ let arguments = CommandLine.arguments
 
 if arguments.contains("--selftest") {
     exit(Selftest.run() ? 0 : 1)
+}
+if let i = arguments.firstIndex(of: "--probe"), i + 1 < arguments.count {
+    exit(Selftest.probe(arguments[i + 1]))
 }
 if let i = arguments.firstIndex(of: "--simulate") {
     let seed = (i + 1 < arguments.count ? UInt64(arguments[i + 1]) : nil) ?? 42

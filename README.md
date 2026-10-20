@@ -5,6 +5,7 @@
 - 공식 프로그램은 그대로 설치해서 쓰면 됩니다. 이 프로그램은 공식 세이브를 **읽기만** 합니다.
 - 전투 엔진은 공식 프로그램의 것을 그대로 씁니다. 원본 저장소를 git 서브모듈(`upstream/`)로 붙여서 함께 컴파일합니다.
 - 지금은 관전형입니다. 기술은 원본처럼 자동으로 고르고, 두 사람 화면에서 같은 전투가 재생됩니다.
+- 서버와는 https/wss로 통신하고, 입장 비밀번호가 있어야 로비에 들어갈 수 있습니다.
 
 설계와 통신 규격은 [docs/design.md](docs/design.md)에 있습니다.
 
@@ -12,50 +13,62 @@
 
 | 부분 | 위치 | 설명 |
 |---|---|---|
-| 클라이언트 | `Sources/`, `build.ps1` | Swift + Win32. 로비, 대전 신청, 대전 화면 |
-| 중계 서버 | `server/` | Node.js 18 이상, 외부 패키지 없음. 리눅스 서버에서 실행 |
+| 클라이언트 | `Sources/`, `build.ps1` | Swift + Win32. 로비, 대전 신청, 대전 화면. 통신은 WinHTTP WebSocket |
+| 중계 서버 | `server/` | Node.js 22, 외부 패키지 없음. Docker로 실행 |
 | 원본 | `upstream/` | 서브모듈. 직접 수정하지 않습니다 |
 
-## 1. 서버 띄우기 (리눅스)
+## 1. 서버 띄우기 (Docker)
 
-Node.js 18 이상이 필요합니다.
-
-```bash
-git clone --recurse-submodules https://github.com/qkrdpwls1223/pokemon-online.git /opt/pmf-battle
-cd /opt/pmf-battle/server
-npm test
-PORT=7777 node server.js
-```
-
-`npm test`는 서버를 임시 포트에 띄우고 가짜 클라이언트로 로비, 신청, 대전 시작, 결과 대조까지 확인합니다.
-
-상시 실행은 systemd로 합니다. `pmf-battle-server.service` 안의 사용자와 경로를 환경에 맞게 고친 뒤 등록합니다.
+서버에는 `server` 폴더만 필요하므로 서브모듈 없이 받으면 됩니다.
 
 ```bash
-sudo useradd --system --no-create-home pmfbattle
-sudo mkdir -p /opt/pmf-battle/server/data && sudo chown pmfbattle /opt/pmf-battle/server/data
-sudo cp pmf-battle-server.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now pmf-battle-server
+git clone https://github.com/qkrdpwls1223/pokemon-online.git ~/pmf-battle
 ```
 
-방화벽에서 TCP 포트(기본 7777)를 열어 주세요. 대전 결과는 `server/data/results.jsonl`에 한 줄씩 쌓입니다.
+```bash
+cd ~/pmf-battle/server && mkdir -p certs data
+```
+
+**인증서**: 사내 서비스와 같은 mkcert 인증 기관으로 서버 IP용 인증서를 만듭니다. 이 인증 기관을 이미 신뢰하는 PC는 추가 설정 없이 접속됩니다.
+
+```bash
+mkcert -cert-file certs/cert.pem -key-file certs/key.pem 10.10.33.36
+```
+
+**설정**: `.env`를 만들고 `SERVER_PASSWORD`를 채웁니다. `PUID`, `PGID`에는 `id -u`, `id -g` 값을 넣습니다. 컨테이너가 권한 600인 키 파일을 읽으려면 파일 주인과 같은 사용자로 떠야 하기 때문입니다.
+
+```bash
+cp .env.example .env
+```
+
+**실행**:
+
+```bash
+docker compose up -d --build
+```
+
+브라우저에서 `https://10.10.33.36:7777`을 열면 서버 상태(JSON)가 보입니다. 대전 결과는 `server/data/results.jsonl`에 한 줄씩 쌓입니다.
+
+| 작업 | 명령 |
+|---|---|
+| 로그 보기 | `docker compose logs -f` |
+| 업데이트 | `git pull && docker compose up -d --build` |
+| 연습 봇까지 띄우기 | `docker compose --profile bot up -d --build` |
+| 중지 | `docker compose down` |
+
+연습 봇은 신청을 자동으로 수락해서 혼자서도 클라이언트를 시험할 수 있게 해 줍니다. 봇은 전투를 계산하지 않으므로 결과 대조는 건너뜁니다.
+
+서버 코드를 고쳤다면 Node 22 이상에서 `npm test`로 확인합니다. 임시 포트에 서버를 띄워 로비, 신청, 대전 시작, 결과 대조, 비밀번호, https/wss까지 검사합니다.
 
 | 환경 변수 | 기본값 | 설명 |
 |---|---|---|
-| `PORT` | `7777` | 리슨 포트 |
-| `HOST` | `0.0.0.0` | 리슨 주소 |
+| `SERVER_PASSWORD` | 없음 | 입장 비밀번호. 비우면 비밀번호 없이 열립니다 |
+| `TLS_CERT`, `TLS_KEY` | 없음 | 둘 다 있으면 https/wss, 없으면 http/ws (로컬 테스트용) |
+| `PORT` | `7777` | 컨테이너 안의 리슨 포트 |
+| `HOST_PORT` | `7777` | 밖으로 여는 포트 (docker-compose) |
 | `MAX_CLIENTS` | `200` | 최대 접속자 |
 | `CHALLENGE_TIMEOUT_MS` | `30000` | 대전 신청 응답 대기 시간 |
 | `RESULTS_FILE` | `./data/results.jsonl` | 빈 값이면 기록 안 함 |
-
-### 혼자 테스트하기: 연습 봇
-
-신청을 자동으로 수락하는 봇입니다. 봇은 전투를 계산하지 않으므로 결과 대조는 건너뜁니다.
-
-```bash
-node tools/bot.js 127.0.0.1 7777 연습봇
-```
 
 ## 2. 클라이언트 빌드 (Windows)
 
@@ -77,7 +90,7 @@ Visual Studio가 이미 있어도 "C++를 사용한 데스크톱 개발" 구성 
 
 ```powershell
 git clone --recurse-submodules https://github.com/qkrdpwls1223/pokemon-online.git
-cd pmf-battle
+cd pokemon-online
 .\build.ps1 selftest
 .\build.ps1
 ```
@@ -94,10 +107,16 @@ cd pmf-battle
 | `.\build.ps1 selftest` | 디버그 빌드 후 자체 점검 |
 | `.\build.ps1 update` | 원본을 최신 main으로 올리고 빌드 |
 
+서버 연결만 따로 확인하려면 디버그 빌드에서 `--probe`를 씁니다. TLS, 프록시, WebSocket 연결까지 확인하고 서버의 첫 응답을 보여 줍니다.
+
+```powershell
+.\build\pmf-battle\pmf-battle.exe --probe https://10.10.33.36:7777
+```
+
 ## 3. 사용법
 
 1. 공식 프로그램에서 키우기 모드를 한 번이라도 시작해서 파티가 있어야 합니다.
-2. `pmf-battle.exe`를 실행하고 서버 주소, 포트, 닉네임을 넣고 **접속**을 누릅니다.
+2. `pmf-battle.exe`를 실행하고 서버 주소(`https://10.10.33.36:7777`), 비밀번호, 닉네임을 넣고 **접속**을 누릅니다.
 3. 왼쪽 목록에서 상대를 고르고 **대전 신청**을 누르거나 더블클릭합니다.
 4. 상대가 수락하면 대전이 자동으로 재생됩니다. **2배속**과 **건너뛰기**를 쓸 수 있습니다.
 5. 끝나면 **로비로 돌아가기**를 누릅니다.
@@ -105,6 +124,17 @@ cd pmf-battle
 - 파티 순서는 공식 프로그램에서 따라다니는 포켓몬이 선두이고, 나머지는 세이브 순서입니다.
 - 공식 프로그램에서 파티를 바꿨다면 **다시 불러오기**를 누르세요.
 - 모든 포켓몬은 HP 가득 찬 상태로 싸웁니다. 대전 결과는 공식 세이브에 반영되지 않습니다.
+- 서버 주소, 닉네임, 비밀번호는 `%LOCALAPPDATA%\pmf-battle\config.json`에 저장됩니다. 비밀번호는 Windows 계정 기준으로 암호화(DPAPI)해서 저장합니다.
+
+### 인증서를 신뢰하지 않는 PC
+
+서버 인증서는 사내 mkcert 인증 기관이 발급합니다. 이 인증 기관을 신뢰하지 않는 PC에서는 "서버 인증서를 신뢰할 수 없습니다" 오류가 납니다. 그럴 때는 서버에서 `mkcert -CAROOT` 폴더의 `rootCA.pem`만 받아서 현재 사용자 신뢰 저장소에 넣습니다. 관리자 권한은 필요 없습니다.
+
+```powershell
+certutil -user -addstore Root rootCA.pem
+```
+
+같은 폴더의 `rootCA-key.pem`은 절대 다른 PC로 옮기거나 공유하면 안 됩니다. 그 키가 있으면 누구나 이 PC들이 신뢰하는 인증서를 만들 수 있습니다.
 
 ## 4. 원본이 업데이트됐을 때
 
@@ -123,7 +153,10 @@ git commit -m "upstream 업데이트"
 | 증상 | 확인할 것 |
 |---|---|
 | "세이브 파일이 없습니다" | 공식 프로그램에서 키우기 모드를 시작했는지 확인 |
-| 서버에 연결할 수 없음 | 서버 실행 여부, 방화벽 포트, 회사망이라면 외부 포트 차단 여부 |
+| "서버에 연결할 수 없습니다" | 컨테이너 실행 여부(`docker compose ps`), 방화벽 포트, 회사망/VPN 접속 여부 |
+| "서버 인증서를 신뢰할 수 없습니다" | 위의 "인증서를 신뢰하지 않는 PC" 참고 |
+| "서버 인증서의 주소가 접속한 주소와 다릅니다" | 인증서를 만들 때 넣은 IP와 접속 주소가 같은지 확인 |
+| "입장 비밀번호가 틀렸습니다" | 서버 `.env`의 `SERVER_PASSWORD`와 같은지 확인 |
 | `[버전 다름]` | 양쪽이 같은 `upstream` 커밋으로 빌드했는지 확인 |
 | "결과 불일치" 경고 | 양쪽 빌드가 같은지 확인하고 `.\build.ps1 selftest` 결과를 비교 |
 

@@ -20,12 +20,12 @@ pmf-battle/
 │  │  ├─ WireMon.swift        통신용 포켓몬 데이터, 원본 Battler 생성
 │  │  ├─ OfficialSave.swift   세이브 읽기 전용 로더
 │  │  └─ PlatformSettings.swift  메모리 전용 설정 백엔드
-│  ├─ Net/                   TCP 소켓(Winsock), 메시지 정의, 로비 클라이언트
+│  ├─ Net/                   WebSocket(WinHTTP), 메시지 정의, 로비 클라이언트
 │  ├─ UI/                    Win32 창, 로비, 대전 화면
 │  ├─ Selftest.swift         --selftest / --simulate
 │  └─ main.swift
 ├─ res/                      매니페스트 (비주얼 스타일, DPI)
-├─ server/                   Node.js 중계 서버 (의존성 없음)
+├─ server/                   Node.js 중계 서버 (의존성 없음, Docker)
 └─ build.ps1
 ```
 
@@ -60,15 +60,20 @@ pmf-battle/
 
 포켓몬은 항상 HP 가득, 상태이상 없이 시작한다. 레벨 보정은 없다. 무작위가 필요한 규칙도 전부 `BattleRNG`에서 뽑는다.
 
-## 4. 통신 프로토콜 v1
+## 4. 통신 프로토콜 v2
 
-TCP 위에 줄바꿈으로 구분한 JSON. 모든 메시지에 `t` 필드가 있다. 서버는 의존성 없는 Node.js(`server/server.js`)다.
+WebSocket 텍스트 메시지 하나에 JSON 객체 하나. 모든 메시지에 `t` 필드가 있다. 서버는 의존성 없는 Node.js(`server/server.js`, WebSocket 처리는 `server/ws.js`)다.
+
+- **주소**: 사용자는 `https://10.10.33.36:7777`처럼 입력한다. 클라이언트는 같은 호스트와 포트의 `/ws`로 WebSocket 업그레이드를 요청한다. `GET /`는 서버 상태 JSON, `GET /health`는 `ok`를 돌려준다.
+- **TLS**: 서버는 `TLS_CERT`, `TLS_KEY`가 있으면 https/wss, 없으면 http/ws로 뜬다. 운영에서는 사내 mkcert 인증 기관이 발급한 IP용 인증서를 쓴다. 클라이언트(WinHTTP)는 Windows 신뢰 저장소로 인증서를 검증한다.
+- **입장 비밀번호**: 서버의 `SERVER_PASSWORD`. `hello.password`와 SHA-256 다이제스트를 상수 시간으로 비교하고, 틀리면 1초 뒤 `error(password)`를 보내고 연결을 닫는다. 클라이언트는 비밀번호를 DPAPI로 암호화해 저장한다.
+- v1(줄바꿈 구분 TCP)과는 호환되지 않는다. `hello.proto`가 다르면 `error(protocol)` 후 연결을 닫는다.
 
 ### 클라이언트 → 서버
 
 | t | 필드 | 설명 |
 |---|---|---|
-| `hello` | `proto`, `name`, `engine`, `client`, `party`, (`bot`) | 첫 메시지. 10초 안에 보내야 한다 |
+| `hello` | `proto`(2), `password`, `name`, `engine`, `client`, `party`, (`bot`) | 첫 메시지. 10초 안에 보내야 한다 |
 | `party` | `party` | 파티 다시 불러오기 |
 | `challenge` | `to` | 대전 신청 |
 | `cancelChallenge` | | 보낸 신청 취소 |
@@ -88,7 +93,7 @@ TCP 위에 줄바꿈으로 구분한 JSON. 모든 메시지에 `t` 필드가 있
 | `battleStart` | `battleId`, `seed`, `mode`, `you`, `a`, `b` | `seed`는 10진수 문자열. `a`/`b`는 `id`, `name`, `party` |
 | `battleCheck` | `battleId`, `consistent` | 양쪽 보고가 모이면 |
 | `peerLeft` | `battleId`, `name` | 대전 중 상대가 나감. 로컬 재생은 계속된다 |
-| `error` | `code`, `message` | |
+| `error` | `code`, `message` | `password`, `protocol`, `name`, `party`, `engine`, `full`은 연결 종료가 뒤따른다 |
 | `pong` | | |
 
 포켓몬 한 마리(`WireMon`)는 `dex`, `level`, `moves`(최대 4), `disabledMoves`(선택), `gender`, `ivs`(선택: `hp`, `atk`, `def`, `spAtk`, `spDef`, `spe`)다. 서버는 범위를 검사하지만 세이브 조작까지 막지는 않는다. 지인끼리 쓰는 전제다.
@@ -105,7 +110,7 @@ TCP 위에 줄바꿈으로 구분한 JSON. 모든 메시지에 `t` 필드가 있
 1. **원본에 작은 훅을 기여(추천).** 예를 들어 `plan()`이 `chooseMove()` 전에 확인하는 `static var moveOverride: ((Battler) -> Int?)?` 같은 몇 줄짜리 변경을 원작자에게 PR로 제안한다. 받아들여지면 서브모듈 구조가 그대로 유지된다.
 2. **빌드 시점 패치.** `patches/*.patch`를 두고, `build.ps1`이 원본 소스를 `build/upstream-src`로 복사한 뒤 `git apply`로 적용해서 컴파일한다. 서브모듈은 깨끗하게 남고, pull 후 패치가 안 맞으면 빌드가 명확히 멈춘다.
 
-프로토콜은 이렇게 늘린다(프로토콜 v2).
+프로토콜은 이렇게 늘린다(프로토콜 v3).
 
 - `battleStart.mode = "manual"`
 - 클라이언트 → 서버 `move { battleId, round, slot }` (slot 0~3, -1은 자동)
@@ -119,4 +124,6 @@ TCP 위에 줄바꿈으로 구분한 JSON. 모든 메시지에 `t` 필드가 있
 - 세이브 파일을 직접 고치면 레벨 100 같은 파티도 만들 수 있다. 서버는 값의 범위만 본다.
 - 대전 화면은 대기 애니메이션, 돌진/흔들림 연출, HP 바, 원본 문구 로그로 단순하게 그린다. 원본의 기술 이펙트와 공격 모션은 원본 오버레이 코드와 얽혀 있어서 가져오지 않았다.
 - 원본이 Core 밖으로 엔진 코드를 옮기거나 Windows 플랫폼 파일 이름을 바꾸면 `build.ps1`의 파일 목록을 고쳐야 한다.
-- 통신은 평문 TCP다. 인증이나 암호화가 필요하면 서버 앞에 TLS 프록시(stunnel 등)를 두는 방식으로 확장한다.
+- 접속 제어는 공용 비밀번호 하나뿐이다. 사용자별 계정은 없다.
+- 서버 주소 `10.10.33.36`은 사설 IP라서 회사망이나 VPN 안에서만 접속된다.
+- mkcert 인증 기관을 신뢰하지 않는 PC는 루트 인증서(`rootCA.pem`)를 직접 설치해야 한다.

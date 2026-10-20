@@ -1,7 +1,10 @@
 # build output (build.ps1)
 /build/
 
-# server
+# server runtime files
 /server/node_modules/
 /server/data/
+/server/.env
+/server/certs/*.pem
+/server/certs/*.key
 *.log

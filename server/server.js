@@ -1,31 +1,41 @@
 #!/usr/bin/env node
 // pmf-battle relay server — lobby, challenges, battle seeds.
 //
-// Protocol v1: newline-delimited JSON over plain TCP (docs/design.md §4).
+// Protocol v2: JSON text messages over WebSocket (docs/design.md §4).
+// With TLS_CERT/TLS_KEY set it serves https + wss (clients use
+// https://host:port); without them, plain http + ws for local testing.
 // The server never simulates battles. It pairs two clients, hands both the
 // same random seed and both parties, and later compares the result digests
 // the two clients report. Zero dependencies: Node >= 18.
 //
 // Env:
 //   PORT=7777  HOST=0.0.0.0  MAX_CLIENTS=200  CHALLENGE_TIMEOUT_MS=30000
+//   TLS_CERT=/certs/cert.pem  TLS_KEY=/certs/key.pem
+//   SERVER_PASSWORD=...       ("" or unset = no password)
 //   RESULTS_FILE=./data/results.jsonl   ("" disables result logging)
 
 'use strict';
 
-const net = require('net');
+const http = require('http');
+const https = require('https');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { acceptUpgrade } = require('./ws');
 
-const SERVER_VERSION = '0.1.0';
-const PROTO = 1;
+const SERVER_VERSION = '0.2.0';
+const PROTO = 2;
 const PORT = parseInt(process.env.PORT || '7777', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const MAX_CLIENTS = parseInt(process.env.MAX_CLIENTS || '200', 10);
 const CHALLENGE_TIMEOUT_MS = parseInt(process.env.CHALLENGE_TIMEOUT_MS || '30000', 10);
 const HELLO_TIMEOUT_MS = 10000;
 const IDLE_TIMEOUT_MS = 90000;          // clients ping every 20 s
-const MAX_LINE = 256 * 1024;
+const MAX_MESSAGE = 256 * 1024;
+const TLS_CERT = process.env.TLS_CERT || '';
+const TLS_KEY = process.env.TLS_KEY || '';
+const PASSWORD = process.env.SERVER_PASSWORD || '';
+const WRONG_PASSWORD_DELAY_MS = 1000;
 const RESULTS_FILE = process.env.RESULTS_FILE === undefined
   ? path.join(__dirname, 'data', 'results.jsonl')
   : process.env.RESULTS_FILE;
@@ -85,10 +95,9 @@ const challenges = new Map();
 const battles = new Map();
 
 class Client {
-  constructor(socket) {
+  constructor(conn) {
     this.id = crypto.randomBytes(6).toString('hex');
-    this.socket = socket;
-    this.buffer = '';
+    this.conn = conn;             // WsConn
     this.ready = false;           // hello accepted
     this.name = null;
     this.engine = null;
@@ -97,12 +106,17 @@ class Client {
     this.bot = false;             // practice bot (tools/bot.js): never simulates
     this.battleId = null;
     this.lastSeen = Date.now();
-    this.addr = `${socket.remoteAddress}:${socket.remotePort}`;
+    this.addr = `${conn.remoteAddress}:${conn.remotePort}`;
   }
 
   send(obj) {
-    if (this.socket.destroyed) return;
-    this.socket.write(JSON.stringify(obj) + '\n');
+    this.conn.send(JSON.stringify(obj));
+  }
+
+  /** Send a final error, then close. */
+  reject(code, message) {
+    this.error(code, message);
+    this.conn.close(1008, code);
   }
 
   error(code, message) {
@@ -293,18 +307,32 @@ function finishBattle(battleId, bt) {
 // ---------------------------------------------------------------------------
 // connection handling
 
+function passwordOk(given) {
+  if (!PASSWORD) return true;
+  if (typeof given !== 'string') return false;
+  // constant-time compare on fixed-length digests
+  const a = crypto.createHash('sha256').update(given, 'utf8').digest();
+  const b = crypto.createHash('sha256').update(PASSWORD, 'utf8').digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
 function onHello(c, msg) {
   if (msg.proto !== PROTO) {
-    c.error('protocol', `프로토콜 버전이 다릅니다 (서버 ${PROTO}, 클라이언트 ${msg.proto}). 클라이언트를 업데이트해 주세요.`);
-    return c.socket.end();
+    return c.reject('protocol', `프로토콜 버전이 다릅니다 (서버 ${PROTO}, 클라이언트 ${msg.proto}). 클라이언트를 업데이트해 주세요.`);
+  }
+  if (!passwordOk(msg.password)) {
+    log(`wrong password from ${c.addr}`);
+    c.helloDone = true;
+    // a short delay makes guessing slow
+    return setTimeout(() => c.reject('password', '입장 비밀번호가 틀렸습니다.'), WRONG_PASSWORD_DELAY_MS);
   }
   const name = cleanName(msg.name);
   const party = cleanParty(msg.party);
   const engine = typeof msg.engine === 'string' && msg.engine.length <= 120 ? msg.engine : null;
-  if (!name) { c.error('name', '닉네임이 올바르지 않습니다.'); return c.socket.end(); }
-  if (!party) { c.error('party', '파티 데이터가 올바르지 않습니다.'); return c.socket.end(); }
-  if (!engine) { c.error('engine', '엔진 버전 정보가 없습니다.'); return c.socket.end(); }
-  if (clients.size > MAX_CLIENTS) { c.error('full', '서버가 가득 찼습니다.'); return c.socket.end(); }
+  if (!name) return c.reject('name', '닉네임이 올바르지 않습니다.');
+  if (!party) return c.reject('party', '파티 데이터가 올바르지 않습니다.');
+  if (!engine) return c.reject('engine', '엔진 버전 정보가 없습니다.');
+  if (clients.size > MAX_CLIENTS) return c.reject('full', '서버가 가득 찼습니다.');
   c.name = uniqueName(name);
   c.party = party;
   c.engine = engine;
@@ -319,6 +347,7 @@ function onHello(c, msg) {
 function handle(c, msg) {
   if (!msg || typeof msg.t !== 'string') return c.error('bad', '잘못된 메시지입니다.');
   if (!c.ready) {
+    if (c.helloDone) return;   // rejected hello in flight
     if (msg.t === 'hello') return onHello(c, msg);
     return c.error('hello', '먼저 hello 메시지를 보내야 합니다.');
   }
@@ -364,53 +393,76 @@ function drop(c) {
   broadcastLobby();
 }
 
-const server = net.createServer((socket) => {
-  socket.setEncoding('utf8');
-  socket.setNoDelay(true);
-  socket.setKeepAlive(true, 30000);
-  const c = new Client(socket);
-  clients.set(c.id, c);
-  c.helloTimer = setTimeout(() => { if (!c.ready) socket.destroy(); }, HELLO_TIMEOUT_MS);
+function statusPayload() {
+  const online = [...clients.values()].filter((c) => c.ready).length;
+  return { name: 'pmf-battle', version: SERVER_VERSION, proto: PROTO, online, battles: battles.size,
+           password: Boolean(PASSWORD) };
+}
 
-  socket.on('data', (chunk) => {
+/** Plain HTTP(S) requests: a tiny status page; the lobby itself is /ws. */
+function onRequest(req, res) {
+  const url = (req.url || '/').split('?')[0];
+  if (req.method === 'GET' && url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('ok');
+  }
+  if (req.method === 'GET' && (url === '/' || url === '/status')) {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(statusPayload(), null, 2));
+  }
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('not found');
+}
+
+function onUpgrade(req, socket, head) {
+  const url = (req.url || '/').split('?')[0];
+  if (url !== '/ws' && url !== '/') {
+    socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    return;
+  }
+  const conn = acceptUpgrade(req, socket, head, { maxMessage: MAX_MESSAGE });
+  if (!conn) return;
+  const c = new Client(conn);
+  clients.set(c.id, c);
+  c.helloTimer = setTimeout(() => { if (!c.ready) conn.destroy(); }, HELLO_TIMEOUT_MS);
+  conn.on('message', (text) => {
     c.lastSeen = Date.now();
-    c.buffer += chunk;
-    if (c.buffer.length > MAX_LINE && c.buffer.indexOf('\n') < 0) {
-      c.error('tooLong', '메시지가 너무 깁니다.');
-      return socket.destroy();
-    }
-    let nl;
-    while ((nl = c.buffer.indexOf('\n')) >= 0) {
-      const line = c.buffer.slice(0, nl).replace(/\r$/, '');
-      c.buffer = c.buffer.slice(nl + 1);
-      if (!line) continue;
-      let msg;
-      try { msg = JSON.parse(line); } catch { c.error('json', 'JSON 형식이 아닙니다.'); continue; }
-      try { handle(c, msg); } catch (e) { log('handler error', e); c.error('internal', '서버 오류'); }
-    }
+    let msg;
+    try { msg = JSON.parse(text); } catch { return c.error('json', 'JSON 형식이 아닙니다.'); }
+    try { handle(c, msg); } catch (e) { log('handler error', e); c.error('internal', '서버 오류'); }
   });
-  socket.on('close', () => drop(c));
-  socket.on('error', () => {});   // 'close' follows
-});
+  conn.on('close', () => drop(c));
+}
+
+let server;
+if (TLS_CERT && TLS_KEY) {
+  server = https.createServer({ cert: fs.readFileSync(TLS_CERT), key: fs.readFileSync(TLS_KEY) }, onRequest);
+} else {
+  server = http.createServer(onRequest);
+}
+server.on('upgrade', onUpgrade);
+server.on('clientError', (err, socket) => { socket.destroy(); });
 
 // Drop connections that went silent (crashed client behind NAT, etc.)
 setInterval(() => {
   const now = Date.now();
   for (const c of clients.values()) {
-    if (now - c.lastSeen > IDLE_TIMEOUT_MS) c.socket.destroy();
+    if (now - c.lastSeen > IDLE_TIMEOUT_MS) c.conn.destroy();
   }
 }, 15000).unref();
 
 server.on('error', (e) => { log('server error', e.message); process.exit(1); });
 server.listen(PORT, HOST, () => {
   const a = server.address();
-  log(`pmf-battle server ${SERVER_VERSION} listening on ${a.address}:${a.port} (proto ${PROTO})`);
+  const scheme = TLS_CERT && TLS_KEY ? 'https/wss' : 'http/ws (no TLS)';
+  log(`pmf-battle server ${SERVER_VERSION} listening on ${a.address}:${a.port} `
+      + `(${scheme}, proto ${PROTO}, password ${PASSWORD ? 'on' : 'off'})`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
     log(`${sig}: shutting down`);
-    for (const c of clients.values()) c.socket.destroy();
+    for (const c of clients.values()) c.conn.destroy();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
   });

@@ -1,11 +1,11 @@
-// Wire protocol v1 — newline-delimited JSON over TCP, one object per line,
-// every object tagged by "t". The server half lives in server/server.js;
+// Wire protocol v2 — one JSON object per WebSocket text message, every
+// object tagged by "t". The server half lives in server/server.js;
 // docs/design.md §4 is the reference table.
 
 import Foundation
 
 enum WireProtocol {
-    static let version = 1
+    static let version = 2
 }
 
 // MARK: - client -> server
@@ -13,6 +13,7 @@ enum WireProtocol {
 struct HelloMsg: Encodable {
     let t = "hello"
     let proto = WireProtocol.version
+    let password: String       // lobby password ("" when the server has none)
     let name: String
     let engine: String
     let client: String
@@ -164,7 +165,7 @@ enum ServerMessage {
     }
 }
 
-func encodeLine<T: Encodable>(_ msg: T) -> String? {
+func encodeJSON<T: Encodable>(_ msg: T) -> String? {
     guard let data = try? JSONEncoder().encode(msg) else { return nil }
     return String(decoding: data, as: UTF8.self)
 }

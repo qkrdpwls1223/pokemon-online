@@ -7,8 +7,8 @@ import Foundation
 private let mainClass = w16("PMFBattleMain")
 
 private enum ID {
-    static let host: Int32 = 101
-    static let port: Int32 = 102
+    static let url: Int32 = 101
+    static let password: Int32 = 102
     static let name: Int32 = 103
     static let connect: Int32 = 104
     static let users: Int32 = 110
@@ -68,8 +68,8 @@ final class AppWindow {
 
     // lobby controls
     private var lobbyControls: [HWND?] = []
-    private var hostEdit: HWND?
-    private var portEdit: HWND?
+    private var urlEdit: HWND?
+    private var passwordEdit: HWND?
     private var nameEdit: HWND?
     private var connectButton: HWND?
     private var statusLabel: HWND?
@@ -89,6 +89,9 @@ final class AppWindow {
     private var users: [LobbyUser] = []
     private var outgoing: (id: String, name: String)?
     private var promptOpen = false
+    /// Why the server is about to close us (wrong password, old client...),
+    /// shown instead of the generic "disconnected" line.
+    private var rejection: String?
     private var fast = false
     private struct Running {
         let battleId: String
@@ -149,19 +152,19 @@ final class AppWindow {
         let edge = DWORD(WS_EX_CLIENTEDGE)
         func add(_ h: HWND?) -> HWND? { lobbyControls.append(h); return h }
 
-        _ = add(makeChild("STATIC", "서버", parent: hwnd, id: 0, x: px(12), y: px(15), w: px(36), h: px(20), font: font))
-        hostEdit = add(makeChild("EDIT", config.host, parent: hwnd, id: ID.host,
-                                 x: px(48), y: px(12), w: px(190), h: px(24), style: editStyle, exStyle: edge, font: font))
-        _ = add(makeChild("STATIC", ":", parent: hwnd, id: 0, x: px(242), y: px(15), w: px(8), h: px(20), font: font))
-        portEdit = add(makeChild("EDIT", String(config.port), parent: hwnd, id: ID.port,
-                                 x: px(252), y: px(12), w: px(60), h: px(24),
-                                 style: editStyle | DWORD(ES_NUMBER), exStyle: edge, font: font))
-        _ = add(makeChild("STATIC", "닉네임", parent: hwnd, id: 0, x: px(324), y: px(15), w: px(48), h: px(20), font: font))
+        _ = add(makeChild("STATIC", "서버", parent: hwnd, id: 0, x: px(12), y: px(15), w: px(34), h: px(20), font: font))
+        urlEdit = add(makeChild("EDIT", config.url, parent: hwnd, id: ID.url,
+                                x: px(46), y: px(12), w: px(220), h: px(24), style: editStyle, exStyle: edge, font: font))
+        _ = add(makeChild("STATIC", "비밀번호", parent: hwnd, id: 0, x: px(276), y: px(15), w: px(56), h: px(20), font: font))
+        passwordEdit = add(makeChild("EDIT", config.password, parent: hwnd, id: ID.password,
+                                     x: px(332), y: px(12), w: px(110), h: px(24),
+                                     style: editStyle | DWORD(ES_PASSWORD), exStyle: edge, font: font))
+        _ = add(makeChild("STATIC", "닉네임", parent: hwnd, id: 0, x: px(452), y: px(15), w: px(46), h: px(20), font: font))
         nameEdit = add(makeChild("EDIT", config.name, parent: hwnd, id: ID.name,
-                                 x: px(372), y: px(12), w: px(150), h: px(24), style: editStyle, exStyle: edge, font: font))
+                                 x: px(498), y: px(12), w: px(150), h: px(24), style: editStyle, exStyle: edge, font: font))
         SendMessageW(nameEdit, EM.setLimitText, 16, 0)
         connectButton = add(makeChild("BUTTON", "접속", parent: hwnd, id: ID.connect,
-                                      x: px(534), y: px(11), w: px(110), h: px(26), style: DWORD(WS_TABSTOP), font: fontBold))
+                                      x: px(658), y: px(11), w: px(110), h: px(26), style: DWORD(WS_TABSTOP), font: fontBold))
         statusLabel = add(makeChild("STATIC", "", parent: hwnd, id: 0,
                                     x: px(12), y: px(46), w: px(756), h: px(20), font: font))
 
@@ -186,7 +189,8 @@ final class AppWindow {
                           "· 대전은 자동으로 진행됩니다(관전형). 기술은 원본처럼 랜덤으로 골라요.\n"
                           + "· 모든 포켓몬은 HP 가득 찬 상태로 싸우고, 공식 세이브는 바뀌지 않습니다.\n"
                           + "· 목록에서 트레이너를 더블클릭해도 대전을 신청할 수 있어요.\n"
-                          + "· 공식 프로그램 버전이 다른 상대와는 대전할 수 없습니다.",
+                          + "· 공식 프로그램 버전이 다른 상대와는 대전할 수 없습니다.\n"
+                          + "· 서버 주소 예: https://10.10.33.36:7777",
                           parent: hwnd, id: 0, x: px(392), y: px(344), w: px(376), h: px(120), font: fontSmall))
         _ = add(makeChild("STATIC",
                           "엔진 \(EngineInfo.upstreamCommit) (공식 \(AppVersion.string) 기준) · 클라이언트 \(ClientInfo.version)",
@@ -243,23 +247,27 @@ final class AppWindow {
             refreshLobbyUI()
             return
         }
-        let host = getText(hostEdit).trimmingCharacters(in: .whitespaces)
         let name = getText(nameEdit).trimmingCharacters(in: .whitespaces)
-        guard !host.isEmpty else { setStatus("서버 주소를 입력해 주세요."); return }
-        guard let port = UInt16(getText(portEdit)), port > 0 else { setStatus("포트 번호가 올바르지 않습니다."); return }
+        let password = getText(passwordEdit)
+        guard let address = ServerAddress(getText(urlEdit)) else {
+            setStatus("서버 주소가 올바르지 않습니다. 예: \(ClientConfig.defaultURL)")
+            return
+        }
         guard !name.isEmpty else { setStatus("닉네임을 입력해 주세요."); return }
         guard !party.isEmpty else {
             reloadParty(announce: true)
             if party.isEmpty { return }
             return toggleConnect()
         }
-        config.host = host
-        config.port = Int(port)
+        config.url = address.display
         config.name = name
+        config.password = password
         config.save()
-        setStatus("\(host):\(port) 에 접속하는 중…")
-        client.connect(host: host, port: port,
-                       hello: HelloMsg(name: name, engine: ClientInfo.engineKey,
+        setText(urlEdit, address.display)
+        rejection = nil
+        setStatus("\(address.display) 에 접속하는 중…")
+        client.connect(to: address,
+                       hello: HelloMsg(password: password, name: name, engine: ClientInfo.engineKey,
                                        client: ClientInfo.version, party: party))
         refreshLobbyUI()
     }
@@ -305,7 +313,12 @@ final class AppWindow {
             self.myId = nil
             self.users = []
             self.outgoing = nil
-            self.setStatus("연결 끊김" + (reason.map { ": \($0)" } ?? ""))
+            if let why = self.rejection {
+                self.setStatus("접속 거부: \(why)")
+            } else {
+                self.setStatus("연결 끊김" + (reason.map { ": \($0)" } ?? ""))
+            }
+            self.rejection = nil
             self.refreshLobbyUI()
         }
         client.onMessage = { [weak self] msg in self?.handle(msg) }
@@ -370,7 +383,14 @@ final class AppWindow {
             setStatus("\(p.name ?? "상대") 님이 접속을 종료했습니다. 이 대전은 끝까지 볼 수 있어요.")
 
         case .error(let e):
-            setStatus("서버: \(e.message)")
+            switch e.code {
+            case "password", "protocol", "name", "party", "engine", "full":
+                rejection = e.message
+                setStatus("접속 거부: \(e.message)")
+                alert(hwnd, e.message, title: "접속할 수 없습니다")
+            default:
+                setStatus("서버: \(e.message)")
+            }
 
         case .pong, .unknown:
             break
@@ -427,8 +447,8 @@ final class AppWindow {
     private func refreshLobbyUI() {
         let connected = client.state == .connected
         setText(connectButton, client.state == .disconnected ? "접속" : "접속 끊기")
-        enable(hostEdit, client.state == .disconnected)
-        enable(portEdit, client.state == .disconnected)
+        enable(urlEdit, client.state == .disconnected)
+        enable(passwordEdit, client.state == .disconnected)
         enable(nameEdit, client.state == .disconnected)
         enable(challengeButton, connected && outgoing == nil)
         enable(cancelButton, connected && outgoing != nil)
