@@ -23,7 +23,7 @@ const fs = require('fs');
 const path = require('path');
 const { acceptUpgrade } = require('./ws');
 
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.3.0';
 const PROTO = 2;
 const PORT = parseInt(process.env.PORT || '7777', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -143,6 +143,8 @@ function lobbyFor(viewer) {
       status: c.status,
       lead: c.party && c.party[0] ? { dex: c.party[0].dex, level: c.party[0].level } : null,
       partySize: c.party ? c.party.length : 0,
+      // what the lobby's opponent panel shows; IVs and gender stay private
+      party: c.party ? c.party.map((m) => ({ dex: m.dex, level: m.level, moves: m.moves })) : [],
       compatible: c.engine === viewer.engine || c.bot || viewer.bot,
       bot: c.bot,
     });

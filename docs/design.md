@@ -86,7 +86,7 @@ WebSocket 텍스트 메시지 하나에 JSON 객체 하나. 모든 메시지에 
 | t | 필드 | 설명 |
 |---|---|---|
 | `welcome` | `id`, `name`, `serverVersion` | 이름이 겹치면 `name`이 바뀌어 온다 |
-| `lobby` | `users[]`: `id`, `name`, `status`, `lead`, `partySize`, `compatible`, `bot` | 받는 사람 기준 목록(본인 제외) |
+| `lobby` | `users[]`: `id`, `name`, `status`, `lead`, `partySize`, `party`, `compatible`, `bot` | 받는 사람 기준 목록(본인 제외). `party`는 로비의 상대 파티 패널용으로 한 마리당 `dex`, `level`, `moves`만 담는다(서버 0.3부터) |
 | `challenged` | `from`, `fromName`, `expiresIn` | 신청을 받음 |
 | `challengeSent` | `to`, `toName`, `expiresIn` | 신청이 접수됨 |
 | `challengeEnded` | `peer`, `peerName`, `reason` | `declined`, `expired`, `cancelled`, `busy`, `incompatible`, `offline` |

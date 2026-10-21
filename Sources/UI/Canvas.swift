@@ -124,6 +124,45 @@ final class Canvas {
         }
     }
 
+    /// Nearest-neighbor src-over of `img`'s sub-rectangle `src` into a
+    /// `dw`×`dh` destination at (x, y); scales up or down by any factor.
+    func blit(_ img: RGBABuffer, src: (x: Int, y: Int, w: Int, h: Int),
+              x: Int, y: Int, w dw: Int, h dh: Int) {
+        guard let bits, src.w > 0, src.h > 0, dw > 0, dh > 0 else { return }
+        img.pixels.withUnsafeBufferPointer { px in
+            for dy in 0..<dh {
+                let ty = y + dy
+                guard ty >= 0, ty < height else { continue }
+                let sy = src.y + dy * src.h / dh
+                guard sy >= 0, sy < img.height else { continue }
+                let row = bits + ty * width
+                for dx in 0..<dw {
+                    let tx = x + dx
+                    guard tx >= 0, tx < width else { continue }
+                    let sx = src.x + dx * src.w / dw
+                    guard sx >= 0, sx < img.width else { continue }
+                    let s = (sy * img.width + sx) * 4
+                    let a = UInt32(px[s + 3])
+                    guard a > 0 else { continue }
+                    let d = row[tx]
+                    let ia = 255 - a
+                    let nr = min(255, UInt32(px[s]) + ((d >> 16) & 0xFF) * ia / 255)
+                    let ng = min(255, UInt32(px[s + 1]) + ((d >> 8) & 0xFF) * ia / 255)
+                    let nb = min(255, UInt32(px[s + 2]) + (d & 0xFF) * ia / 255)
+                    row[tx] = 0xFF00_0000 | (nr << 16) | (ng << 8) | nb
+                }
+            }
+        }
+    }
+
+    /// 1-px rectangle outline.
+    func strokeRect(x: Int, y: Int, w: Int, h: Int, _ rgb: UInt32) {
+        fillRect(x: x, y: y, w: w, h: 1, rgb)
+        fillRect(x: x, y: y + h - 1, w: w, h: 1, rgb)
+        fillRect(x: x, y: y, w: 1, h: h, rgb)
+        fillRect(x: x + w - 1, y: y, w: 1, h: h, rgb)
+    }
+
     // MARK: GDI text on the canvas
 
     /// Draw text into a rect. `align`: 0 left, 1 center, 2 right.
@@ -160,7 +199,7 @@ func mix(_ a: UInt32, _ b: UInt32, _ t: Double) -> UInt32 {
 /// upstream's Sprite helpers from characters/<id>/ next to the exe.
 enum SpriteCache {
     /// PMD sheet rows: 0 S, 1 SE, 2 E, 3 NE, 4 N, 5 NW, 6 W, 7 SW.
-    enum Facing: Int { case upRight = 3, downLeft = 7 }
+    enum Facing: Int { case down = 0, upRight = 3, downLeft = 7 }
 
     struct Idle {
         let frames: [RGBABuffer]

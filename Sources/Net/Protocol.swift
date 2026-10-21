@@ -73,12 +73,20 @@ struct LobbyLead: Decodable {
     let level: Int
 }
 
+/// One party member as the lobby shows it (no IVs or gender).
+struct LobbyMon: Decodable {
+    let dex: Int
+    let level: Int
+    let moves: [Int]
+}
+
 struct LobbyUser: Decodable {
     let id: String
     let name: String
     let status: String         // "idle" | "challenging" | "battling"
     let lead: LobbyLead?
     let partySize: Int
+    let party: [LobbyMon]?     // server 0.3+; older servers send only `lead`
     let compatible: Bool       // same engine key as the receiving client
     let bot: Bool?             // practice bot (server/tools/bot.js)
 }

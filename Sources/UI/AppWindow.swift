@@ -77,6 +77,7 @@ final class AppWindow {
     private var challengeButton: HWND?
     private var cancelButton: HWND?
     private var partyLabel: HWND?
+    private var preview: PartyPreview?
     // battle controls
     private var battleView: BattleView?
     private var battleControls: [HWND?] = []
@@ -127,7 +128,7 @@ final class AppWindow {
         fontBold = makeFont(13, weight: 700, k: k)
         fontSmall = makeFont(11, k: k)
 
-        var rc = RECT(left: 0, top: 0, right: px(780), bottom: px(560))
+        var rc = RECT(left: 0, top: 0, right: px(1080), bottom: px(560))
         AdjustWindowRect(&rc, style, false)
         SetWindowPos(hwnd, nil, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
                      UINT(SWP_NOMOVE | SWP_NOZORDER))
@@ -154,19 +155,19 @@ final class AppWindow {
 
         _ = add(makeChild("STATIC", "서버", parent: hwnd, id: 0, x: px(12), y: px(15), w: px(34), h: px(20), font: font))
         urlEdit = add(makeChild("EDIT", config.url, parent: hwnd, id: ID.url,
-                                x: px(46), y: px(12), w: px(220), h: px(24), style: editStyle, exStyle: edge, font: font))
-        _ = add(makeChild("STATIC", "비밀번호", parent: hwnd, id: 0, x: px(276), y: px(15), w: px(56), h: px(20), font: font))
+                                x: px(46), y: px(12), w: px(400), h: px(24), style: editStyle, exStyle: edge, font: font))
+        _ = add(makeChild("STATIC", "비밀번호", parent: hwnd, id: 0, x: px(456), y: px(15), w: px(56), h: px(20), font: font))
         passwordEdit = add(makeChild("EDIT", config.password, parent: hwnd, id: ID.password,
-                                     x: px(332), y: px(12), w: px(110), h: px(24),
+                                     x: px(512), y: px(12), w: px(150), h: px(24),
                                      style: editStyle | DWORD(ES_PASSWORD), exStyle: edge, font: font))
-        _ = add(makeChild("STATIC", "닉네임", parent: hwnd, id: 0, x: px(452), y: px(15), w: px(46), h: px(20), font: font))
+        _ = add(makeChild("STATIC", "닉네임", parent: hwnd, id: 0, x: px(672), y: px(15), w: px(46), h: px(20), font: font))
         nameEdit = add(makeChild("EDIT", config.name, parent: hwnd, id: ID.name,
-                                 x: px(498), y: px(12), w: px(150), h: px(24), style: editStyle, exStyle: edge, font: font))
+                                 x: px(718), y: px(12), w: px(200), h: px(24), style: editStyle, exStyle: edge, font: font))
         SendMessageW(nameEdit, EM.setLimitText, 16, 0)
         connectButton = add(makeChild("BUTTON", "접속", parent: hwnd, id: ID.connect,
-                                      x: px(658), y: px(11), w: px(110), h: px(26), style: DWORD(WS_TABSTOP), font: fontBold))
+                                      x: px(928), y: px(11), w: px(140), h: px(26), style: DWORD(WS_TABSTOP), font: fontBold))
         statusLabel = add(makeChild("STATIC", "", parent: hwnd, id: 0,
-                                    x: px(12), y: px(46), w: px(756), h: px(20), font: font))
+                                    x: px(12), y: px(46), w: px(1056), h: px(20), font: font))
 
         _ = add(makeChild("STATIC", "접속 중인 트레이너", parent: hwnd, id: 0,
                           x: px(12), y: px(76), w: px(360), h: px(20), font: fontBold))
@@ -192,13 +193,18 @@ final class AppWindow {
                           + "· 공식 프로그램 버전이 다른 상대와는 대전할 수 없습니다.\n"
                           + "· 서버 주소 예: https://10.10.33.36:7777",
                           parent: hwnd, id: 0, x: px(392), y: px(344), w: px(376), h: px(120), font: fontSmall))
+
+        _ = add(makeChild("STATIC", "상대 파티", parent: hwnd, id: 0,
+                          x: px(788), y: px(76), w: px(280), h: px(20), font: fontBold))
+        preview = PartyPreview(parent: hwnd, k: k, x: px(788), y: px(98), w: px(280), h: px(404))
+        _ = add(preview?.hwnd)
         _ = add(makeChild("STATIC",
                           "엔진 \(EngineInfo.upstreamCommit) (공식 \(AppVersion.string) 기준) · 클라이언트 \(ClientInfo.version)",
-                          parent: hwnd, id: 0, x: px(12), y: px(530), w: px(756), h: px(18), font: fontSmall))
+                          parent: hwnd, id: 0, x: px(12), y: px(530), w: px(1056), h: px(18), font: fontSmall))
     }
 
     private func buildBattle() {
-        battleView = BattleView(parent: hwnd, k: k, x: 0, y: 0, w: px(780), h: px(506))
+        battleView = BattleView(parent: hwnd, k: k, x: 0, y: 0, w: px(1080), h: px(506))
         battleView?.onFinished = { [weak self] in self?.battleFinished() }
         battleControls.append(battleView?.hwnd)
         fastButton = makeChild("BUTTON", "2배속", parent: hwnd, id: ID.fast,
@@ -207,7 +213,7 @@ final class AppWindow {
         battleControls.append(makeChild("BUTTON", "건너뛰기", parent: hwnd, id: ID.skip,
                                         x: px(130), y: px(514), w: px(110), h: px(34), style: DWORD(WS_TABSTOP), font: font))
         backButton = makeChild("BUTTON", "로비로 돌아가기", parent: hwnd, id: ID.back,
-                               x: px(598), y: px(514), w: px(170), h: px(34), style: DWORD(WS_TABSTOP), font: fontBold)
+                               x: px(898), y: px(514), w: px(170), h: px(34), style: DWORD(WS_TABSTOP), font: fontBold)
         battleControls.append(backButton)
     }
 
@@ -225,6 +231,7 @@ final class AppWindow {
         case ID.connect: toggleConnect()
         case ID.challenge: challengeSelected()
         case ID.cancel: client.cancelChallenge()
+        case ID.users where code == LB.notifySelChange: refreshPreview()
         case ID.users where code == LB.notifyDblClk: challengeSelected()
         case ID.reload: reloadParty(announce: true)
         case ID.fast:
@@ -470,5 +477,12 @@ final class AppWindow {
         }
         if users.isEmpty, connected { listAdd(usersList, "(다른 접속자가 없습니다)") }
         if let selectedId, let i = users.firstIndex(where: { $0.id == selectedId }) { listSelect(usersList, i) }
+        refreshPreview()
+    }
+
+    /// The opponent panel follows the list selection (and its latest lobby data).
+    private func refreshPreview() {
+        let i = listSelection(usersList)
+        preview?.show(i.flatMap { users.indices.contains($0) ? users[$0] : nil })
     }
 }

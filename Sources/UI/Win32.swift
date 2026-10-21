@@ -26,6 +26,7 @@ enum LB {
     static let resetContent: UINT = 0x0184
     static let setCurSel: UINT = 0x0186
     static let getCurSel: UINT = 0x0188
+    static let notifySelChange: Int = 1    // LBN_SELCHANGE
     static let notifyDblClk: Int = 2       // LBN_DBLCLK
 }
 

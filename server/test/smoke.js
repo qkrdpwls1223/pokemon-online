@@ -149,6 +149,10 @@ function makeCert() {
       assert.strictEqual(u.compatible, true);
       assert.deepStrictEqual(u.lead, { dex: 25, level: 40 });
       assert.strictEqual(u.partySize, 2);
+      assert.deepStrictEqual(u.party, [
+        { dex: 25, level: 40, moves: [84, 85, 86, 87] },
+        { dex: 6, level: 40, moves: [52, 53] },
+      ]);
       assert.ok(!l.users.some((x) => x.id === alice.id), 'lobby excludes self');
     });
 
@@ -284,6 +288,7 @@ function makeCert() {
       bob.send({ t: 'party', party: [{ dex: 143, level: 50, moves: [1, 2], gender: 'male' }] });
       const l = await alice.lobby((m) => m.users.some((u) => u.id === bob.id && u.lead && u.lead.dex === 143));
       assert.strictEqual(l.users.find((u) => u.id === bob.id).partySize, 1);
+      assert.deepStrictEqual(l.users.find((u) => u.id === bob.id).party, [{ dex: 143, level: 50, moves: [1, 2] }]);
     });
 
     await step('practice bot: compatible with any engine, no cross-check', async () => {
