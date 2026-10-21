@@ -76,8 +76,8 @@ final class AppWindow {
     private var usersList: HWND?
     private var challengeButton: HWND?
     private var cancelButton: HWND?
-    private var partyLabel: HWND?
-    private var preview: PartyPreview?
+    private var partyPreview: PartyPreview?
+    private var foePreview: PartyPreview?
     private var infoLabel: HWND?
     // battle controls
     private var battleView: BattleView?
@@ -189,8 +189,8 @@ final class AppWindow {
                           x: px(392), y: px(76), w: px(270), h: px(20), font: fontBold))
         _ = add(makeChild("BUTTON", "다시 불러오기", parent: hwnd, id: ID.reload,
                           x: px(664), y: px(72), w: px(104), h: px(26), style: DWORD(WS_TABSTOP), font: font))
-        partyLabel = add(makeChild("STATIC", "", parent: hwnd, id: 0,
-                                   x: px(392), y: px(104), w: px(376), h: px(230), font: font))
+        partyPreview = PartyPreview(parent: hwnd, k: k, x: px(392), y: px(98), w: px(376), h: px(344))
+        _ = add(partyPreview?.hwnd)
         _ = add(makeChild("STATIC",
                           "· 대전은 자동으로 진행됩니다(관전형). 기술은 원본처럼 랜덤으로 골라요.\n"
                           + "· 모든 포켓몬은 HP 가득 찬 상태로 싸우고, 공식 세이브는 바뀌지 않습니다.\n"
@@ -198,12 +198,13 @@ final class AppWindow {
                           + "· 공식 프로그램 버전이 다른 상대와는 대전할 수 없습니다.\n"
                           + "· 서버 주소 예: https://10.10.33.36:7777\n"
                           + "· 새 버전 받기: 서버 주소 뒤에 /download",
-                          parent: hwnd, id: 0, x: px(392), y: px(344), w: px(376), h: px(120), font: fontSmall))
+                          parent: hwnd, id: 0, x: px(392), y: px(448), w: px(376), h: px(80), font: fontSmall))
 
         _ = add(makeChild("STATIC", "상대 파티", parent: hwnd, id: 0,
                           x: px(788), y: px(76), w: px(280), h: px(20), font: fontBold))
-        preview = PartyPreview(parent: hwnd, k: k, x: px(788), y: px(98), w: px(280), h: px(404))
-        _ = add(preview?.hwnd)
+        foePreview = PartyPreview(parent: hwnd, k: k, x: px(788), y: px(98), w: px(280), h: px(404),
+                                  message: "목록에서 트레이너를 고르면\n상대 파티를 여기서 볼 수 있어요.")
+        _ = add(foePreview?.hwnd)
         infoLabel = add(makeChild("STATIC", "", parent: hwnd, id: 0,
                                   x: px(12), y: px(530), w: px(1056), h: px(18), font: fontSmall))
     }
@@ -306,15 +307,12 @@ final class AppWindow {
     private func reloadParty(announce: Bool) {
         do {
             party = try OfficialSave.loadParty()
-            setText(partyLabel, party.enumerated().map { i, m in
-                let moves = m.moves.compactMap { GameData.moves[$0]?.displayName }.joined(separator: ", ")
-                return "\(i == 0 ? "★" : "  ")\(m.displayName)  Lv.\(m.level)\n      \(moves)"
-            }.joined(separator: "\n"))
+            partyPreview?.show(party: party)
             if announce { setStatus("파티를 다시 불러왔습니다 (\(party.count)마리).") }
             if client.state == .connected { client.sendParty(party) }
         } catch {
             party = []
-            setText(partyLabel, "\(error)")
+            partyPreview?.show(message: "\(error)")
             if announce { setStatus("파티를 불러오지 못했습니다.") }
         }
     }
@@ -528,6 +526,6 @@ final class AppWindow {
     /// The opponent panel follows the list selection (and its latest lobby data).
     private func refreshPreview() {
         let i = listSelection(usersList)
-        preview?.show(i.flatMap { users.indices.contains($0) ? users[$0] : nil })
+        foePreview?.show(i.flatMap { users.indices.contains($0) ? users[$0] : nil })
     }
 }
