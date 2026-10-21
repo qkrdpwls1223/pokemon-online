@@ -78,6 +78,7 @@ final class AppWindow {
     private var cancelButton: HWND?
     private var partyLabel: HWND?
     private var preview: PartyPreview?
+    private var infoLabel: HWND?
     // battle controls
     private var battleView: BattleView?
     private var battleControls: [HWND?] = []
@@ -137,6 +138,9 @@ final class AppWindow {
         buildLobby()
         buildBattle()
         wireClient()
+        OfficialEffects.onChange = { [weak self] _ in self?.refreshInfo() }
+        OfficialEffects.prepare()
+        refreshInfo()
         reloadParty(announce: false)
         setMode(battle: false)
         refreshLobbyUI()
@@ -200,9 +204,14 @@ final class AppWindow {
                           x: px(788), y: px(76), w: px(280), h: px(20), font: fontBold))
         preview = PartyPreview(parent: hwnd, k: k, x: px(788), y: px(98), w: px(280), h: px(404))
         _ = add(preview?.hwnd)
-        _ = add(makeChild("STATIC",
-                          "엔진 \(EngineInfo.upstreamCommit) (공식 \(AppVersion.string) 기준) · 클라이언트 \(ClientInfo.version) (빌드 \(BuildInfo.id))",
-                          parent: hwnd, id: 0, x: px(12), y: px(530), w: px(1056), h: px(18), font: fontSmall))
+        infoLabel = add(makeChild("STATIC", "", parent: hwnd, id: 0,
+                                  x: px(12), y: px(530), w: px(1056), h: px(18), font: fontSmall))
+    }
+
+    /// Bottom line: engine/client identity plus the move-effect status.
+    private func refreshInfo() {
+        setText(infoLabel, "엔진 \(EngineInfo.upstreamCommit) (공식 \(AppVersion.string) 기준) · "
+                + "클라이언트 \(ClientInfo.version) (빌드 \(BuildInfo.id)) · 기술 이펙트 \(OfficialEffects.state.label)")
     }
 
     private func buildBattle() {
@@ -442,6 +451,23 @@ final class AppWindow {
         setMode(battle: true)
         battleView?.play(battle: battle, steps: steps, mySide: mySide, myName: me.name, foeName: foe.name)
         SetForegroundWindow(hwnd)
+    }
+
+    /// `--demo [seed]`: a local battle (my party vs the selftest team) straight
+    /// into the battle view — no server, nothing reported. For checking
+    /// playback and move effects.
+    func startDemo(seed: UInt64) {
+        let sample = Selftest.sampleTeams()
+        guard let battle = PvPBattle(seed: seed, partyA: party.isEmpty ? sample.a : party, partyB: sample.b) else {
+            setStatus("데모 대전을 만들 수 없습니다.")
+            return
+        }
+        let steps = battle.runToEnd()
+        fast = false
+        setText(fastButton, "2배속")
+        battleView?.setFast(false)
+        setMode(battle: true)
+        battleView?.play(battle: battle, steps: steps, mySide: .a, myName: config.name, foeName: "데모 상대")
     }
 
     private func battleFinished() {

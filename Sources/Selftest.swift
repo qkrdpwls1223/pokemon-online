@@ -97,7 +97,16 @@ enum Selftest {
             print("  INFO  공식 세이브 없음 — \(error)")
         }
 
-        // 6. eyeball a log
+        // 6. move effects copied from the official app (informational without it)
+        let fx = OfficialEffects.prepareBlocking()
+        print("  INFO  기술 이펙트: \(fx.label)" + (OfficialEffects.locateSource().map { " ← \($0.path)" } ?? ""))
+        if OfficialEffects.isReady {
+            let moves = Set((t.a + t.b).flatMap { $0.moves })
+            let shown = moves.filter { EffectPlayer.clip(forMove: $0) != nil || EffectPlayer.projectile(forMove: $0) != nil }
+            check(!shown.isEmpty, "기술 이펙트 불러오기 (샘플 팀 기술 \(moves.count)개 중 \(shown.count)개)")
+        }
+
+        // 7. eyeball a log
         print("\n--- 샘플 전투 로그 (seed 20261019) ---")
         if let b = PvPBattle(seed: 20261019, partyA: t.a, partyB: t.b) {
             var active: [PvPSide: Int] = [.a: 0, .b: 0]

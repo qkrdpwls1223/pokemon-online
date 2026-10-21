@@ -1,15 +1,26 @@
 // Battle playback view: replays a precomputed PvP timeline with idle
-// sprites, HP bars and upstream's own battle-log wording.
+// sprites, HP bars, upstream's own battle-log wording and upstream's
+// move-effect clips (EffectPlayer).
 //
 // The view never simulates — it only plays PvPStep values. Spectator mode
 // hands it the whole timeline at once; manual mode (later) will append steps
 // round by round through `append(_:)`.
+//
+// Effect choreography follows upstream's BattleController beat by beat
+// (projectile -> companion -> hit clip -> stat auras -> ailment, one clip at
+// a time) in 1/60 s ticks; that controller itself is tied to the overlay and
+// wild encounters, so it is mirrored here rather than reused. File-backed
+// clips need OfficialEffects.isReady; the synthetic ones (stat auras,
+// confusion orbit, Leech Seed drain) and the screen flash always play.
 
 import WinSDK
 import Foundation
 
 private let battleViewClass = w16("PMFBattleView")
 private var battleViewRegistered = false
+
+/// Upstream's playback tick (EoS native rate).
+private let tickMs = 1000.0 / 60.0
 
 private func battleViewProc(_ hwnd: HWND?, _ msg: UINT, _ wParam: WPARAM, _ lParam: LPARAM) -> LRESULT {
     guard let view = BattleView.instance, view.hwnd == hwnd else {
@@ -72,9 +83,28 @@ final class BattleView {
     private var logLines: [String] = []
     private var pendingLines: [(at: Double, text: String)] = []
     private var pendingHP: (at: Double, side: PvPSide, hp: Int, fainted: Bool)?
-    private var lunge: (side: PvPSide, until: Double)?
     private var shake: (side: PvPSide, from: Double, until: Double)?
     private var banner: String?
+
+    // effects (all times in ms into the current step)
+    /// Body motion: a contact lunge peaking at the impact, or a small nudge
+    /// toward the foe when the move leaves from range.
+    private struct Motion {
+        let side: PvPSide
+        let from: Double, peak: Double, until: Double
+        let reach: Double                 // px toward the foe at the peak
+    }
+    private var motion: Motion?
+    /// Clips play one after another, as upstream draws only its first.
+    private struct ScheduledEffect {
+        var run: RunningEffect
+        let start: Double
+        let length: Double
+        let scale: Int
+    }
+    private var effects: [ScheduledEffect] = []
+    /// Full-screen moves and Explosion: tinted veil + quake for 20 ticks.
+    private var veil: (from: Double, color: UInt32, explosion: Bool)?
 
     init(parent: HWND?, k: Double, x: Int32, y: Int32, w: Int32, h: Int32) {
         self.k = k
@@ -120,8 +150,8 @@ final class BattleView {
         logLines = ["\(foeName) 님과의 대전이 시작됐다!"]
         pendingLines = []
         pendingHP = nil
-        lunge = nil
         shake = nil
+        clearEffects()
         slots = [.a: Slot(), .b: Slot()]
         down = [.a: [], .b: []]
         hp = [:]
@@ -147,7 +177,8 @@ final class BattleView {
         }
         flushPending()
         stepElapsed = stepDuration
-        lunge = nil; shake = nil
+        shake = nil
+        clearEffects()
         for side in [PvPSide.a, .b] {
             if var s = slots[side] { s.shownHP = Double(s.targetHP); s.fadeIn = 1; slots[side] = s }
         }
@@ -158,9 +189,16 @@ final class BattleView {
         KillTimer(hwnd, 1)
         battle = nil
         steps = []
+        clearEffects()
     }
 
     var isFinished: Bool { finishedFired }
+
+    private func clearEffects() {
+        motion = nil
+        effects = []
+        veil = nil
+    }
 
     // MARK: - timeline
 
@@ -218,8 +256,8 @@ final class BattleView {
         guard let battle, steps.indices.contains(i) else { return }
         cursor = i
         stepElapsed = 0
-        lunge = nil
         shake = nil
+        clearEffects()
         switch steps[i] {
         case .sendOut(let side, let index, let reason):
             let wire = battle.wire(side, index)
@@ -245,28 +283,25 @@ final class BattleView {
             stepDuration = 750
 
         case .event(let e):
-            let actor: PvPSide = e.actorIsPlayer ? .a : .b
             let target: PvPSide = e.targetIsPlayer ? .a : .b
             let entries = BattleLog.lines(for: e, playerName: label(.a), wildName: label(.b))
-            stepDuration = entries.isEmpty ? 350 : 1100
+            let beat = choreograph(e)
+            stepDuration = max(beat.end, entries.isEmpty ? 350 : 1000)
             for entry in entries {
                 let at: Double
                 switch entry.phase {
                 case .start: at = 0
-                case .impact: at = stepDuration * 0.35
-                case .resolve: at = stepDuration * 0.7
+                case .impact: at = beat.impact
+                case .resolve: at = beat.hit
                 }
                 if at == 0 { pushLog(entry.text) } else { pendingLines.append((at: at, text: entry.text)) }
             }
-            if e.kind == .attack || e.kind == .miss {
-                lunge = (side: actor, until: stepDuration * 0.35)
-            }
             if e.damage > 0, e.kind != .recover {
-                shake = (side: target, from: stepDuration * 0.35, until: stepDuration * 0.6)
+                shake = (side: target, from: beat.impact, until: beat.impact + 250)
             }
             if var a = slots[.a] { a.asleep = e.playerAsleep; slots[.a] = a }
             if var b = slots[.b] { b.asleep = e.wildAsleep; slots[.b] = b }
-            pendingHP = (at: stepDuration * 0.35, side: target, hp: e.targetHP, fainted: e.fainted)
+            pendingHP = (at: beat.hit, side: target, hp: e.targetHP, fainted: e.fainted)
 
         case .end(let winner, let byDecision):
             stepDuration = 400
@@ -306,6 +341,269 @@ final class BattleView {
         return side == mySide ? name : "상대 \(name)"
     }
 
+    // MARK: - effect choreography
+
+    /// Ailment tag -> status clip key (upstream BattleController.ailmentLanding).
+    private static let ailmentClip: [String: String] = [
+        "paralysis": "paralyzed", "burn": "burn", "poison": "poison", "badPoison": "poison",
+        "sleep": "asleep", "freeze": "frozen", "confusion": "confused", "infatuation": "infatuated",
+    ]
+
+    /// Queues this event's clips/motion/veil; returns its beat in ms:
+    /// `impact` (hit lands: flinch, impact lines), `hit` (HP starts moving,
+    /// resolve lines) and `end` (next step may start).
+    private func choreograph(_ e: BattleEvent) -> (impact: Double, hit: Double, end: Double) {
+        let files = OfficialEffects.isReady
+        let actor: PvPSide = e.actorIsPlayer ? .a : .b
+        let target: PvPSide = e.targetIsPlayer ? .a : .b
+        var queue: [(RunningEffect, Int)] = []
+        func play(_ clip: EffectClip, at side: PvPSide, maxTicks: Int, delay: Int = 0) {
+            queue.append((RunningEffect(clip: clip, anchor: anchor(side), maxTicks: maxTicks, delay: delay),
+                          spriteScale(side)))
+        }
+        func statusClip(_ key: String) -> EffectClip? {
+            key == "confused" || files ? EffectPlayer.statusClip(key) : nil
+        }
+        let explosion = e.moveId > 0 && EffectPlayer.isExplosionMove(e.moveId)
+        var impactAt = 0, hitAt = 0, endAt = 0
+
+        switch e.kind {
+        case .attack, .miss:
+            let from = anchor(actor), to = anchor(target), foe = anchor(actor.other)
+            let travel = 18, windup = e.followUp ? 6 : 20
+            let move = GameData.moves[e.moveId]
+            let statusCry = move?.sound == true && move?.category == "Status"
+            // Self-targeted cries (Howl) still ring out toward the foe.
+            let aim = target == actor && statusCry ? foe : to
+            let octant = abs(aim.x - from.x) > 0.01 || abs(aim.y - from.y) > 0.01
+                ? Sprite.octant(dx: aim.x - from.x, dy: aim.y - from.y) : 6
+            let proj = files && e.moveId > 0 ? EffectPlayer.projectile(forMove: e.moveId, octant: octant) : nil
+            var total = windup
+            if let proj {
+                queue.append((RunningEffect(clip: proj, from: from, to: to, maxTicks: travel), spriteScale(target)))
+                total = travel
+            }
+            // Status cries with no projectile ring just ahead of the user.
+            let cry = proj == nil && statusCry
+            let front = CGPoint(x: from.x + (aim.x - from.x) * 0.3, y: from.y + (aim.y - from.y) * 0.3)
+            func playHit(_ clip: EffectClip, at point: CGPoint, side: PvPSide, maxTicks: Int, delay: Int) {
+                queue.append((RunningEffect(clip: clip, anchor: point, maxTicks: maxTicks, delay: delay),
+                              spriteScale(side)))
+            }
+            // One multi-hit strike per event: its visual raps 3 quick times.
+            let strikeReps = e.multiStrike ? 3 : 1
+            var coTicks = 0
+            if files, e.moveId > 0, !explosion,
+               let co = EffectPlayer.coClip(forMove: e.moveId, octant: octant) {
+                let ticks = min(co.loop ? 24 : co.totalTicks, e.multiStrike ? 8 : 36)
+                let delay = proj == nil ? windup : 0
+                // Drain gathers collect on the caster, cries ring ahead of it.
+                let drain: Bool
+                if case .drain = MoveMechanics.mechanic(for: e.moveId) { drain = true } else { drain = false }
+                let (point, side) = drain ? (from, actor) : cry ? (front, actor) : (to, target)
+                for i in 0..<strikeReps {
+                    playHit(co, at: point, side: side, maxTicks: (i == 0 ? delay : 0) + ticks, delay: i == 0 ? delay : 0)
+                }
+                coTicks = ticks * strikeReps
+                total += coTicks
+            }
+            impactAt = total
+            // Explosion moves boomed on the selfHit beat; this one only lands damage.
+            if files, e.moveId > 0, !explosion,
+               let clip = EffectPlayer.clip(forMove: e.moveId, octant: octant) {
+                let reps = coTicks > 0 ? 1 : strikeReps
+                let hitTicks = min(clip.loop ? 40 : clip.totalTicks, reps > 1 ? 8 : 54)
+                let delay = proj == nil && coTicks == 0 ? windup : 0
+                for i in 0..<reps {
+                    playHit(clip, at: cry ? front : to, side: cry ? actor : target,
+                            maxTicks: (i == 0 ? delay : 0) + hitTicks, delay: i == 0 ? delay : 0)
+                }
+                total += hitTicks * reps
+            }
+            // Stat changes ("ATK +1" tokens) stream an aura on whose stats moved.
+            if let tag = e.statusApplied {
+                let side = tag.hasPrefix("self ") ? actor : target
+                for (stat, delta) in BattleController.statChanges(in: tag).prefix(3) {
+                    if let aura = EffectPlayer.statAura(stat, rising: delta > 0) {
+                        let ticks = min(aura.totalTicks, 30)
+                        play(aura, at: side, maxTicks: ticks)
+                        total += ticks
+                    }
+                }
+            }
+            hitAt = max(impactAt, min(total, 72))
+            if e.moveId > 0, EffectPlayer.isScreen(e.moveId) {
+                hitAt = impactAt + 20
+                veil = (from: Double(impactAt) * tickMs, color: rgb(TypeStyle.rgba(move?.type)), explosion: false)
+            }
+            let resolve = e.damage > 0 ? (e.multiStrike && e.statusApplied == nil ? 14 : 26)
+                                       : (e.kind == .miss ? 24 : 10)
+            endAt = hitAt + resolve + 16
+            // An inflicted ailment shows its condition clip after the move's own.
+            if e.kind == .attack, let s = e.statusApplied, let key = Self.ailmentClip[s] {
+                if let clip = statusClip(key) {
+                    play(clip, at: target, maxTicks: min(clip.loop ? 30 : clip.totalTicks, 44))
+                }
+                endAt = max(endAt, hitAt + resolve + 52)
+            }
+            // Only a landed (or whiffed damaging) contact move rams the foe;
+            // the rest leave from range with a small nudge.
+            if e.moveId > 0, !explosion, !EffectPlayer.isScreen(e.moveId) {
+                let contact = (e.damage > 0 || (e.kind == .miss && BattleEngine.isDamaging(e.moveId)))
+                    && !BattleController.rangedVisual(e.moveId)
+                if contact {
+                    let peak = Double(impactAt) * tickMs
+                    motion = Motion(side: actor, from: max(0, peak - Double(windup) * tickMs), peak: peak,
+                                    until: peak + 12 * tickMs, reach: Double(px(22)))
+                } else {
+                    let launch = Double(proj == nil ? windup : 0) * tickMs
+                    motion = Motion(side: actor, from: 0, peak: max(launch, 6 * tickMs),
+                                    until: max(launch, 6 * tickMs) + 10 * tickMs, reach: Double(px(8)))
+                }
+            }
+
+        case .residual:
+            // End-of-round chip damage: the condition's clip over the victim.
+            impactAt = 8
+            hitAt = 22
+            if e.moveName == "leech seed", let clip = EffectPlayer.drainClip {
+                // The stolen HP flies victim -> seeder.
+                let travel = 26
+                queue.append((RunningEffect(clip: clip, from: anchor(target), to: anchor(target.other),
+                                            maxTicks: travel), spriteScale(target)))
+                hitAt = max(hitAt, travel)
+            } else if let clip = statusClip(e.moveName) {
+                let ticks = min(clip.loop ? 30 : clip.totalTicks, 44)
+                play(clip, at: target, maxTicks: ticks)
+                hitAt = max(hitAt, ticks)
+            }
+            endAt = hitAt + 24 + 12
+
+        case .selfHit:
+            if explosion {
+                // Detonation beat: blast over the USER, flash + quake, then its gauge drains.
+                impactAt = 6
+                hitAt = 6
+                if files, let clip = EffectPlayer.clip(forMove: e.moveId) {
+                    let ticks = min(clip.loop ? 40 : clip.totalTicks, 54)
+                    play(clip, at: actor, maxTicks: 6 + ticks, delay: 6)
+                    hitAt = 6 + ticks
+                }
+                veil = (from: 6 * tickMs, color: 0xFFA84D, explosion: true)
+                endAt = hitAt + 26 + 12
+            } else {
+                impactAt = 6
+                hitAt = 6
+                endAt = hitAt + 24 + 12
+            }
+
+        case .skip:
+            // A lost turn (paralyzed / frozen / asleep / in love) plays its condition over the actor.
+            impactAt = 4
+            endAt = 34
+            if let clip = statusClip(e.moveName) {
+                let ticks = min(clip.loop ? 30 : clip.totalTicks, 44)
+                play(clip, at: actor, maxTicks: ticks, delay: 4)
+                endAt = max(endAt, ticks + 16)
+            }
+            if e.moveName == "asleep" { endAt = 46 }
+
+        case .recover:
+            // Heal moves play their clip(s) over the healer before the gauge fills.
+            impactAt = 6
+            hitAt = 8
+            if files, e.moveId > 0 {
+                var t = 0
+                if let co = EffectPlayer.coClip(forMove: e.moveId) {
+                    let ticks = min(co.loop ? 24 : co.totalTicks, 36)
+                    play(co, at: target, maxTicks: ticks)
+                    t += ticks
+                }
+                if let clip = EffectPlayer.clip(forMove: e.moveId) {
+                    let ticks = min(clip.loop ? 30 : clip.totalTicks, 44)
+                    play(clip, at: target, maxTicks: ticks)
+                    t += ticks
+                }
+                hitAt = max(hitAt, t)
+            }
+            endAt = hitAt + 22 + 12
+
+        case .item, .ball:
+            // Never emitted in PvP (no items, no balls).
+            impactAt = 6
+            hitAt = 6
+            endAt = 30
+        }
+
+        var start = 0.0
+        for (run, scale) in queue {
+            let ticks = run.clip.loop || run.from != run.to
+                ? run.maxTicks : min(run.maxTicks, run.delay + run.clip.totalTicks)
+            effects.append(ScheduledEffect(run: run, start: start, length: Double(ticks) * tickMs, scale: scale))
+            start += Double(ticks) * tickMs
+        }
+        return (Double(impactAt) * tickMs, Double(hitAt) * tickMs, Double(endAt) * tickMs)
+    }
+
+    private func rgb(_ c: RGBA) -> UInt32 {
+        func ch(_ v: Double) -> UInt32 { UInt32(max(0, min(255, (v * 255).rounded()))) }
+        return (ch(c.r) << 16) | (ch(c.g) << 8) | ch(c.b)
+    }
+
+    // MARK: - layout
+
+    private struct Layout {
+        let fieldH: Int
+        let foeBase: (x: Int, y: Int)
+        let myBase: (x: Int, y: Int)
+    }
+
+    private func layout(w: Int, h: Int) -> Layout {
+        let fieldH = h - px(92)
+        return Layout(fieldH: fieldH,
+                      foeBase: (x: w * 72 / 100, y: fieldH * 50 / 100),
+                      myBase: (x: w * 27 / 100, y: fieldH * 88 / 100))
+    }
+
+    private func currentLayout() -> Layout {
+        var rc = RECT()
+        GetClientRect(hwnd, &rc)
+        return layout(w: Int(rc.right - rc.left), h: Int(rc.bottom - rc.top))
+    }
+
+    private func spriteScale(_ side: PvPSide) -> Int {
+        side == mySide ? max(2, px(3.2)) : max(2, px(2.6))
+    }
+
+    private func facing(_ side: PvPSide) -> SpriteCache.Facing {
+        side == mySide ? .upRight : .downLeft
+    }
+
+    /// Where the side's idle frame goes (top-left), without motion offsets.
+    private func spriteOrigin(_ side: PvPSide, _ idle: SpriteCache.Idle, _ frame: RGBABuffer,
+                              _ L: Layout) -> (x: Int, y: Int) {
+        let base = side == mySide ? L.myBase : L.foeBase
+        let scale = spriteScale(side)
+        // Feet (lowest opaque row) rest slightly below the platform's center line.
+        return (base.x - frame.width * scale / 2, base.y - idle.footY * scale + px(6))
+    }
+
+    /// Effect anchor: the center of the side's sprite cell, in upstream's
+    /// y-up world convention (RunningEffect math and Sprite.octant use it).
+    private func anchor(_ side: PvPSide) -> CGPoint {
+        let L = currentLayout()
+        let base = side == mySide ? L.myBase : L.foeBase
+        var cy = Double(base.y - px(40))
+        if let battle, let s = slots[side], s.index >= 0 {
+            let idle = SpriteCache.idle(dex: battle.wire(side, s.index).dex, facing: facing(side))
+            if let frame = idle.frames.first {
+                let o = spriteOrigin(side, idle, frame, L)
+                cy = Double(o.y + frame.height * spriteScale(side) / 2)
+            }
+        }
+        return CGPoint(x: Double(base.x), y: -cy)
+    }
+
     // MARK: - paint
 
     fileprivate func paint() {
@@ -321,27 +619,46 @@ final class BattleView {
         canvas.present(to: hdc)
     }
 
+    /// 0...1 while the veil is up (sin-shaped), else nil.
+    private func veilStrength() -> Double? {
+        guard let v = veil else { return nil }
+        let t = (stepElapsed - v.from) / (20 * tickMs)
+        guard t >= 0, t < 1 else { return nil }
+        return sin(t * Double.pi)
+    }
+
     private func drawScene(w: Int, h: Int) {
-        let logH = px(92)
-        let fieldH = h - logH
+        let L = layout(w: w, h: h)
+        let logH = h - L.fieldH
+        let fieldH = L.fieldH
         // sky + ground
         canvas.gradient(x: 0, y: 0, w: w, h: fieldH * 55 / 100, top: 0xBFE6FF, bottom: 0xEAF7FF)
         canvas.gradient(x: 0, y: fieldH * 55 / 100, w: w, h: fieldH - fieldH * 55 / 100,
                         top: 0xBDE5A1, bottom: 0x8CCB6E)
 
         let foeSide = mySide.other
-        let foeBase = (x: w * 72 / 100, y: fieldH * 50 / 100)
-        let myBase = (x: w * 27 / 100, y: fieldH * 88 / 100)
-        canvas.fillEllipse(cx: foeBase.x, cy: foeBase.y, rx: px(90), ry: px(20), 0x9AD27F)
-        canvas.fillEllipse(cx: myBase.x, cy: myBase.y, rx: px(110), ry: px(24), 0x9AD27F)
+        canvas.fillEllipse(cx: L.foeBase.x, cy: L.foeBase.y, rx: px(90), ry: px(20), 0x9AD27F)
+        canvas.fillEllipse(cx: L.myBase.x, cy: L.myBase.y, rx: px(110), ry: px(24), 0x9AD27F)
 
-        drawMon(side: foeSide, base: foeBase, facing: .downLeft, scale: max(2, px(2.6)), towardX: -1)
-        drawMon(side: mySide, base: myBase, facing: .upRight, scale: max(2, px(3.2)), towardX: 1)
+        // Quake during a full-screen move: the two combatants jolt apart.
+        var quake = 0
+        if let v = veil, veilStrength() != nil {
+            let t = (stepElapsed - v.from) / (20 * tickMs)
+            let amplitude = Double((v.explosion ? 6 : 3) * spriteScale(foeSide))
+            quake = Int(sin(stepElapsed / tickMs * 1.9) * amplitude * (1 - t))
+        }
+        drawMon(side: foeSide, L: L, towardX: -1, quake: -quake)
+        drawMon(side: mySide, L: L, towardX: 1, quake: quake)
 
         drawInfoBox(side: foeSide, x: px(16), y: px(16), showNumbers: false)
         drawInfoBox(side: mySide, x: w - px(16) - px(250), y: fieldH - px(78), showNumbers: true)
 
-        // log panel
+        drawEffects()
+        if let v = veil, let s = veilStrength() {
+            canvas.tint(x: 0, y: 0, w: w, h: fieldH, v.color, alpha: s * 0.22)
+        }
+
+        // log panel (drawn after the effects so big clips never spill into it)
         canvas.fillRect(x: 0, y: fieldH, w: w, h: logH, 0x2B2F3A)
         canvas.fillRect(x: 0, y: fieldH, w: w, h: px(3), 0x4D5568)
         for (i, line) in logLines.enumerated() {
@@ -360,26 +677,39 @@ final class BattleView {
         }
     }
 
-    private func drawMon(side: PvPSide, base: (x: Int, y: Int), facing: SpriteCache.Facing,
-                         scale: Int, towardX: Int) {
+    private func drawMon(side: PvPSide, L: Layout, towardX: Int, quake: Int) {
         guard let battle, let s = slots[side], s.index >= 0, !s.fainted else { return }
-        let idle = SpriteCache.idle(dex: battle.wire(side, s.index).dex, facing: facing)
+        let idle = SpriteCache.idle(dex: battle.wire(side, s.index).dex, facing: facing(side))
         guard !idle.frames.isEmpty else { return }
         let frame = idle.frames[Int(animClock / 140) % idle.frames.count]
-        var ox = 0, oy = 0
-        if let l = lunge, l.side == side, stepElapsed < l.until {
-            let t = stepElapsed / l.until
-            let amt = sin(t * Double.pi) * Double(px(22))
+        let scale = spriteScale(side)
+        var ox = quake, oy = 0
+        if let m = motion, m.side == side, stepElapsed >= m.from, stepElapsed < m.until {
+            let f = stepElapsed < m.peak
+                ? sin((stepElapsed - m.from) / max(1, m.peak - m.from) * Double.pi / 2)
+                : cos((stepElapsed - m.peak) / max(1, m.until - m.peak) * Double.pi / 2)
+            let amt = f * m.reach
             ox += Int(amt) * towardX
             oy -= Int(amt * 0.4) * towardX
         }
         if let sh = shake, sh.side == side, stepElapsed >= sh.from, stepElapsed < sh.until {
             ox += (Int(stepElapsed / 40) % 2 == 0) ? px(5) : -px(5)
         }
-        let dw = frame.width * scale
-        // Feet (lowest opaque row) rest slightly below the platform's center line.
-        canvas.blit(frame, x: base.x - dw / 2 + ox, y: base.y - idle.footY * scale + px(6) + oy,
-                    scale: scale, alpha: s.fadeIn)
+        let o = spriteOrigin(side, idle, frame, L)
+        canvas.blit(frame, x: o.x + ox, y: o.y + oy, scale: scale, alpha: s.fadeIn)
+    }
+
+    /// The scheduled clip playing right now (at most one), centered on its
+    /// RunningEffect position.
+    private func drawEffects() {
+        for var fx in effects where stepElapsed >= fx.start && stepElapsed < fx.start + fx.length {
+            fx.run.tick = Int((stepElapsed - fx.start) / tickMs)
+            guard let current = fx.run.current(scale: CGFloat(fx.scale)) else { continue }
+            let (image, pos) = current
+            let img = image.buffer
+            canvas.blit(img, x: Int(pos.x.rounded()) - img.width * fx.scale / 2,
+                        y: Int((-pos.y).rounded()) - img.height * fx.scale / 2, scale: fx.scale)
+        }
     }
 
     private func drawInfoBox(side: PvPSide, x: Int, y: Int, showNumbers: Bool) {

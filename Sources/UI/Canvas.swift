@@ -155,6 +155,26 @@ final class Canvas {
         }
     }
 
+    /// Blend a flat color over a rectangle (screen-flash veil).
+    func tint(x: Int, y: Int, w: Int, h: Int, _ rgb: UInt32, alpha: Double) {
+        guard let bits, alpha > 0 else { return }
+        let x0 = max(0, x), y0 = max(0, y)
+        let x1 = min(width, x + w), y1 = min(height, y + h)
+        guard x1 > x0, y1 > y0 else { return }
+        let a = UInt32(max(0, min(255, (alpha * 255).rounded()))), ia = 255 - a
+        let r = ((rgb >> 16) & 0xFF) * a, g = ((rgb >> 8) & 0xFF) * a, b = (rgb & 0xFF) * a
+        for yy in y0..<y1 {
+            let row = bits + yy * width
+            for xx in x0..<x1 {
+                let d = row[xx]
+                let nr = (r + ((d >> 16) & 0xFF) * ia) / 255
+                let ng = (g + ((d >> 8) & 0xFF) * ia) / 255
+                let nb = (b + (d & 0xFF) * ia) / 255
+                row[xx] = 0xFF00_0000 | (nr << 16) | (ng << 8) | nb
+            }
+        }
+    }
+
     /// 1-px rectangle outline.
     func strokeRect(x: Int, y: Int, w: Int, h: Int, _ rgb: UInt32) {
         fillRect(x: x, y: y, w: w, h: 1, rgb)

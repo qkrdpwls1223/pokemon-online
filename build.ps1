@@ -178,7 +178,10 @@ switch ($mode) {
         $json = Join-Path $pubDir "latest.json"
         Remove-Item $zip, $json -ErrorAction SilentlyContinue
         Write-Host "==> Zipping $appName..."
+        # Move-effect frames are ROM extractions copied from the official app at
+        # run time (Sources\Adapter\OfficialEffects.swift) - never ship them.
         & "$env:SystemRoot\System32\tar.exe" -a -c -f $zip --exclude "*.lib" --exclude "*.exp" --exclude "*.pdb" `
+            --exclude "*/gamedata/effects" --exclude "*/gamedata/effects.copying" `
             -C (Join-Path $PSScriptRoot "build") $appName
         if ($LASTEXITCODE -ne 0) { Write-Error "zip failed" }
         $version = (Select-String -Path "Sources\UI\ClientConfig.swift" -Pattern 'static let version = "([^"]+)"').Matches[0].Groups[1].Value

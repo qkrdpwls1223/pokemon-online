@@ -6,7 +6,7 @@ import WinSDK
 import Foundation
 
 enum ClientInfo {
-    static let version = "0.4.0"
+    static let version = "0.5.0"
 
     /// Clients are only paired when this matches exactly: same upstream
     /// commit (same engine + game data), same PvP rules, same protocol.

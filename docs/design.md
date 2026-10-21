@@ -19,6 +19,7 @@ pmf-battle/
 │  │  ├─ PvPBattle.swift      파티 대전 진행기 (원본 1:1 BattleSession 위에 교체 규칙)
 │  │  ├─ WireMon.swift        통신용 포켓몬 데이터, 원본 Battler 생성
 │  │  ├─ OfficialSave.swift   세이브 읽기 전용 로더
+│  │  ├─ OfficialEffects.swift  공식 앱 설치본에서 기술 이펙트 이미지 복사
 │  │  └─ PlatformSettings.swift  메모리 전용 설정 백엔드
 │  ├─ Net/                   WebSocket(WinHTTP), 메시지 정의, 로비 클라이언트
 │  ├─ UI/                    Win32 창, 로비, 대전 화면
@@ -31,7 +32,7 @@ pmf-battle/
 
 빌드에 들어가는 원본 파일은 `upstream/Sources/Core/**` 전체와 Windows 플랫폼 파일 3개(`PlatformWin`, `ScreenAdapterWin`, `ItemIconsWin`)다. 원본이 Core 안에 파일을 추가해도 자동으로 포함된다.
 
-원본을 pull한 뒤 빌드가 깨지면 고칠 곳은 `Sources/Adapter/`다. UI와 네트워크 코드는 원본 타입 중 `BattleEvent`, `BattleLog`, `Sprite`, `Characters`, `GameData`만 직접 쓴다.
+원본을 pull한 뒤 빌드가 깨지면 고칠 곳은 `Sources/Adapter/`다. UI와 네트워크 코드는 원본 타입 중 `BattleEvent`, `BattleLog`, `Sprite`, `Characters`, `GameData`와 기술 이펙트 재생에 필요한 것(`EffectPlayer`, `RunningEffect`, `BattleController`의 정적 함수 `statChanges`/`rangedVisual`, `MoveMechanics`, `TypeStyle`)만 직접 쓴다. 이 이름들이 바뀌면 `Sources/UI/BattleView.swift`도 고쳐야 한다.
 
 ## 3. 결정적(deterministic) 전투
 
@@ -119,10 +120,21 @@ WebSocket 텍스트 메시지 하나에 JSON 객체 하나. 모든 메시지에 
 
 양쪽이 같은 입력으로 같은 라운드를 계산하므로 결정성은 그대로 유지된다. 시간 초과 시 "자동"은 엔진의 무작위 선택이고, 그것도 `BattleRNG`에서 뽑으므로 양쪽이 같다.
 
-## 6. 알려진 제한
+## 6. 기술 이펙트
+
+대전 화면은 원본의 기술 이펙트(`EffectPlayer`)를 그대로 재생한다. 원본의 재생 순서를 따라 투사체 → 보조 연출 → 타격 → 능력치 오라 → 상태이상 순으로 한 번에 하나씩 그리고, HP는 타격이 들어간 뒤에 줄어든다. 원본의 연출 컨트롤러(`BattleController`)는 오버레이와 야생 조우에 묶여 있어서 쓰지 않고, 같은 타이밍(1/60초 틱)을 `BattleView`에 옮겼다.
+
+- **에셋 위치.** 이펙트 프레임(`gamedata/effects/`)은 롬에서 추출한 이미지라 원본 git에 없다. 공식 앱 설치본에만 들어 있다(약 220개 폴더, 8천여 개 파일, 6MB 남짓). 원본 코드는 exe 옆 `gamedata\effects`에서만 읽으므로, 시작할 때 공식 앱 폴더에서 이 위치로 복사한다. 공식 앱 쪽은 읽기만 한다.
+- **공식 앱 찾는 순서.** 환경 변수 `PMF_BATTLE_EFFECTS`(이펙트 폴더 자체) → 설치 프로그램이 남긴 레지스트리(`Uninstall` 항목 중 이름에 "Mouse Follower"가 들어간 것의 `InstallLocation`) → 실행 중인 `PokemonMouseFollower.exe`의 폴더(무설치 zip 사용자) → `%LOCALAPPDATA%\Programs\PokemonMouseFollower`.
+- **복사.** 백그라운드에서 `effects.copying`에 복사한 뒤 이름을 바꿔 끼운다. 복사본에는 출처 표시 파일(`.pmf-battle-source`: 경로, 폴더 수, 공식 exe 크기와 수정 시각)을 넣어서, 공식 앱이 업데이트되면 다음 실행 때 다시 복사한다. 표시 파일이 없는 폴더는 직접 넣은 것으로 보고 건드리지 않는다. 링크(정션)로 된 폴더는 지우지 않는다.
+- **복사가 끝나기 전에는 파일 이펙트를 요청하지 않는다.** 원본 `EffectPlayer`는 파일이 없던 결과도 프로세스가 끝날 때까지 캐시하기 때문이다. 그동안에도 파일이 필요 없는 연출(화면 번쩍임, 능력치 오라, 혼란, 씨뿌리기 흡수)은 나온다.
+- **배포.** `publish` zip에는 이펙트를 넣지 않는다(`build.ps1`의 tar 제외 항목). 받는 사람도 공식 앱이 있어야 대전할 수 있으니(세이브가 필요하다), 각자 자기 설치본에서 복사해 온다.
+- **결정성과 무관.** 이펙트는 전투 계산이 끝난 타임라인을 재생할 때만 쓰고, 이펙트 코드에는 난수가 없다. 전투 결과, digest, 엔진 호환 키, 프로토콜은 그대로다.
+
+## 7. 알려진 제한
 
 - 세이브 파일을 직접 고치면 레벨 100 같은 파티도 만들 수 있다. 서버는 값의 범위만 본다.
-- 대전 화면은 대기 애니메이션, 돌진/흔들림 연출, HP 바, 원본 문구 로그로 단순하게 그린다. 원본의 기술 이펙트와 공격 모션은 원본 오버레이 코드와 얽혀 있어서 가져오지 않았다.
+- 대전 화면에는 원본의 공격·피격 포즈가 없다. 기술 이펙트와 돌진/흔들림 연출, HP 바, 원본 문구 로그로 그린다. 공식 앱을 찾지 못한 PC에서는 파일 이펙트 없이 재생된다(창 아래쪽에 "기술 이펙트 꺼짐"과 이유가 뜬다).
 - 원본이 Core 밖으로 엔진 코드를 옮기거나 Windows 플랫폼 파일 이름을 바꾸면 `build.ps1`의 파일 목록을 고쳐야 한다.
 - 접속 제어는 공용 비밀번호 하나뿐이다. 사용자별 계정은 없다.
 - 서버 주소 `10.10.33.36`은 사설 IP라서 회사망이나 VPN 안에서만 접속된다.
