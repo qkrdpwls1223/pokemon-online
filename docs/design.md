@@ -64,7 +64,7 @@ pmf-battle/
 
 WebSocket 텍스트 메시지 하나에 JSON 객체 하나. 모든 메시지에 `t` 필드가 있다. 서버는 의존성 없는 Node.js(`server/server.js`, WebSocket 처리는 `server/ws.js`)다.
 
-- **주소**: 사용자는 `https://10.10.33.36:7777`처럼 입력한다. 클라이언트는 같은 호스트와 포트의 `/ws`로 WebSocket 업그레이드를 요청한다. `GET /`는 서버 상태 JSON, `GET /health`는 `ok`를 돌려준다.
+- **주소**: 사용자는 `https://10.10.33.36:7777`처럼 입력한다. 클라이언트는 같은 호스트와 포트의 `/ws`로 WebSocket 업그레이드를 요청한다. `GET /`는 서버 상태 JSON, `GET /health`는 `ok`를 돌려준다. `GET /download`는 `build.ps1 publish`가 `CLIENT_DIR`에 올린 최신 클라이언트 압축 파일(`pmf-battle.zip`, 정보는 `latest.json`)을 내려준다.
 - **TLS**: 서버는 `TLS_CERT`, `TLS_KEY`가 있으면 https/wss, 없으면 http/ws로 뜬다. 운영에서는 사내 mkcert 인증 기관이 발급한 IP용 인증서를 쓴다. 클라이언트(WinHTTP)는 Windows 신뢰 저장소로 인증서를 검증한다.
 - **입장 비밀번호**: 서버의 `SERVER_PASSWORD`. `hello.password`와 SHA-256 다이제스트를 상수 시간으로 비교하고, 틀리면 1초 뒤 `error(password)`를 보내고 연결을 닫는다. 클라이언트는 비밀번호를 DPAPI로 암호화해 저장한다.
 - v1(줄바꿈 구분 TCP)과는 호환되지 않는다. `hello.proto`가 다르면 `error(protocol)` 후 연결을 닫는다.
@@ -85,7 +85,7 @@ WebSocket 텍스트 메시지 하나에 JSON 객체 하나. 모든 메시지에 
 
 | t | 필드 | 설명 |
 |---|---|---|
-| `welcome` | `id`, `name`, `serverVersion` | 이름이 겹치면 `name`이 바뀌어 온다 |
+| `welcome` | `id`, `name`, `serverVersion`, `latestClient` | 이름이 겹치면 `name`이 바뀌어 온다. `latestClient`는 올라온 클라이언트의 `build`, `version`이고 없으면 `null`(서버 0.4부터). 클라이언트는 자기 빌드 번호보다 새것이면 내려받기를 안내한다 |
 | `lobby` | `users[]`: `id`, `name`, `status`, `lead`, `partySize`, `party`, `compatible`, `bot` | 받는 사람 기준 목록(본인 제외). `party`는 로비의 상대 파티 패널용으로 한 마리당 `dex`, `level`, `moves`만 담는다(서버 0.3부터) |
 | `challenged` | `from`, `fromName`, `expiresIn` | 신청을 받음 |
 | `challengeSent` | `to`, `toName`, `expiresIn` | 신청이 접수됨 |

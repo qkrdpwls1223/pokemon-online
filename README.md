@@ -69,6 +69,7 @@ docker compose up -d --build
 | `MAX_CLIENTS` | `200` | 최대 접속자 |
 | `CHALLENGE_TIMEOUT_MS` | `30000` | 대전 신청 응답 대기 시간 |
 | `RESULTS_FILE` | `./data/results.jsonl` | 빈 값이면 기록 안 함 |
+| `CLIENT_DIR` | `./data/client` | `build.ps1 publish`가 올린 클라이언트 압축 파일 위치. `GET /download`로 내려준다 |
 
 ## 2. 클라이언트 빌드 (Windows)
 
@@ -106,6 +107,21 @@ cd pokemon-online
 | `.\build.ps1 dev` | 디버그 빌드, 콘솔 로그 창과 함께 실행 |
 | `.\build.ps1 selftest` | 디버그 빌드 후 자체 점검 |
 | `.\build.ps1 update` | 원본을 최신 main으로 올리고 빌드 |
+| `.\build.ps1 publish 사용자@10.10.33.36` | 릴리스 빌드 후 압축해서 서버에 올림 (아래 참고) |
+
+### 다른 PC에 나눠 주기
+
+```powershell
+.\build.ps1 publish 사용자@10.10.33.36
+```
+
+빌드한 폴더를 압축해서 ssh(`scp`)로 서버의 `~/pmf-battle/server/data/client/`에 올립니다. 그러면 다른 PC에서는 브라우저로 `https://10.10.33.36:7777/download`를 열어 바로 받을 수 있습니다. 서버를 다시 띄울 필요는 없습니다.
+
+- 대상(`사용자@호스트`)은 처음 한 번만 적으면 `build\publish-target.txt`에 기억되고, 다음부터는 `.\build.ps1 publish`만 치면 됩니다.
+- 올리는 위치가 다르면 환경 변수 `PMF_PUBLISH_DIR`에 홈 기준 경로를 넣습니다.
+- ssh 키를 등록해 두면 비밀번호를 세 번 묻지 않습니다.
+- 이전 빌드로 접속한 사람에게는 접속할 때 새 버전이 있다는 안내가 뜨고, 확인을 누르면 브라우저에서 내려받기가 시작됩니다. 빌드마다 시각으로 된 빌드 번호가 붙고(창 아래쪽에 표시), 서버에 올라온 것이 더 새것이면 안내합니다.
+- 내려받기 주소에는 입장 비밀번호가 없습니다. 사내망에서만 열리는 서버라는 전제입니다.
 
 서버 연결만 따로 확인하려면 디버그 빌드에서 `--probe`를 씁니다. TLS, 프록시, WebSocket 연결까지 확인하고 서버의 첫 응답을 보여 줍니다.
 

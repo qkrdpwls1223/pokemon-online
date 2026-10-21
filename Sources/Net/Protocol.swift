@@ -57,10 +57,17 @@ struct Envelope: Decodable {
     let t: String
 }
 
+/// The client build last published to the server (build.ps1 publish).
+struct LatestClient: Decodable {
+    let build: String          // BuildInfo.id of that build
+    let version: String
+}
+
 struct WelcomeMsg: Decodable {
     let id: String
     let name: String           // may differ from the requested one (dedup)
     let serverVersion: String?
+    let latestClient: LatestClient?   // server 0.4+, nil when nothing is published
 }
 
 struct ServerErrorMsg: Decodable {

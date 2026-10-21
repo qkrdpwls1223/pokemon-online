@@ -87,6 +87,7 @@ async function join(port, name, { engine = ENGINE, party = PARTY, password = PAS
   await c.ready();
   c.send({ t: 'hello', proto: PROTO, password, name, engine, client: 'smoke', party });
   const w = await c.next('welcome');
+  c.welcome = w;
   c.id = w.id;
   c.name = w.name;
   return c;
@@ -133,7 +134,8 @@ function makeCert() {
 (async () => {
   const port = await freePort();
   URL_BASE = `ws://127.0.0.1:${port}`;
-  const srv = await startServer(port, {});
+  const clientDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pmf-client-'));
+  const srv = await startServer(port, { CLIENT_DIR: clientDir });
   let tlsSrv = null;
   let certInfo = null;
 
@@ -351,6 +353,26 @@ function makeCert() {
       assert.strictEqual((await fetch(`http://127.0.0.1:${port}/nope`)).status, 404);
     });
 
+    await step('published client: /download, status and welcome', async () => {
+      const base = `http://127.0.0.1:${port}`;
+      assert.strictEqual(alice.welcome.latestClient, null);
+      assert.strictEqual((await fetch(`${base}/download`)).status, 404);
+      const zip = Buffer.concat([Buffer.from('PK', 'latin1'), Buffer.alloc(18)]);   // empty zip
+      fs.writeFileSync(path.join(clientDir, 'pmf-battle.zip'), zip);
+      // Windows PowerShell 5.1 writes a BOM; the server must cope.
+      fs.writeFileSync(path.join(clientDir, 'latest.json'),
+        '﻿' + JSON.stringify({ build: '20261021-120000', version: '0.4.0', sha256: 'x' }));
+      const r = await fetch(`${base}/download`);
+      assert.strictEqual(r.status, 200);
+      assert.match(r.headers.get('content-disposition'), /filename="pmf-battle-20261021-120000\.zip"/);
+      assert.deepStrictEqual(Buffer.from(await r.arrayBuffer()), zip);
+      assert.strictEqual((await (await fetch(`${base}/`)).json()).client, '20261021-120000');
+      const d = await join(port, 'Downloader');
+      assert.deepStrictEqual(d.welcome.latestClient, { build: '20261021-120000', version: '0.4.0' });
+      d.close();
+      await d.closed;
+    });
+
     certInfo = makeCert();
     if (certInfo) {
       await step('https + wss with a TLS certificate', async () => {
@@ -382,6 +404,7 @@ function makeCert() {
     srv.kill('SIGTERM');
     if (tlsSrv) tlsSrv.kill('SIGTERM');
     if (certInfo) fs.rmSync(certInfo.dir, { recursive: true, force: true });
+    fs.rmSync(clientDir, { recursive: true, force: true });
     process.exit(0);
   } catch (e) {
     console.error('\nFAIL:', e.message);
@@ -389,6 +412,7 @@ function makeCert() {
     srv.kill('SIGKILL');
     if (tlsSrv) tlsSrv.kill('SIGKILL');
     if (certInfo) fs.rmSync(certInfo.dir, { recursive: true, force: true });
+    fs.rmSync(clientDir, { recursive: true, force: true });
     process.exit(1);
   }
 })();

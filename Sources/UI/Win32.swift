@@ -122,6 +122,15 @@ func alert(_ owner: HWND?, _ text: String, title: String = "포켓몬 대전") {
     }
 }
 
+/// Open a URL in the default browser.
+func openURL(_ url: String) {
+    _ = w16("open").withUnsafeBufferPointer { verb in
+        w16(url).withUnsafeBufferPointer { u in
+            ShellExecuteW(nil, verb.baseAddress, u.baseAddress, nil, nil, SW_SHOWNORMAL)
+        }
+    }
+}
+
 // MARK: - UI-thread hop
 
 /// Background threads queue closures here; the main window drains the queue

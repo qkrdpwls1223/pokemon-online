@@ -13,6 +13,8 @@
 //   TLS_CERT=/certs/cert.pem  TLS_KEY=/certs/key.pem
 //   SERVER_PASSWORD=...       ("" or unset = no password)
 //   RESULTS_FILE=./data/results.jsonl   ("" disables result logging)
+//   CLIENT_DIR=./data/client  (build.ps1 publish uploads pmf-battle.zip +
+//                              latest.json here; served at GET /download)
 
 'use strict';
 
@@ -23,7 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const { acceptUpgrade } = require('./ws');
 
-const SERVER_VERSION = '0.3.0';
+const SERVER_VERSION = '0.4.0';
 const PROTO = 2;
 const PORT = parseInt(process.env.PORT || '7777', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -39,6 +41,8 @@ const WRONG_PASSWORD_DELAY_MS = 1000;
 const RESULTS_FILE = process.env.RESULTS_FILE === undefined
   ? path.join(__dirname, 'data', 'results.jsonl')
   : process.env.RESULTS_FILE;
+const CLIENT_DIR = process.env.CLIENT_DIR || path.join(__dirname, 'data', 'client');
+const CLIENT_ZIP = 'pmf-battle.zip';
 
 const GENDERS = new Set(['male', 'female', 'genderless']);
 const IV_KEYS = ['hp', 'atk', 'def', 'spAtk', 'spDef', 'spe'];
@@ -341,7 +345,7 @@ function onHello(c, msg) {
   c.bot = msg.bot === true;
   c.ready = true;
   clearTimeout(c.helloTimer);
-  c.send({ t: 'welcome', id: c.id, name: c.name, serverVersion: SERVER_VERSION });
+  c.send({ t: 'welcome', id: c.id, name: c.name, serverVersion: SERVER_VERSION, latestClient: latestClient() });
   log(`join ${c.name} (${c.addr}) engine=${engine} party=${party.length}`);
   broadcastLobby();
 }
@@ -397,8 +401,50 @@ function drop(c) {
 
 function statusPayload() {
   const online = [...clients.values()].filter((c) => c.ready).length;
+  const latest = latestClient();
   return { name: 'pmf-battle', version: SERVER_VERSION, proto: PROTO, online, battles: battles.size,
-           password: Boolean(PASSWORD) };
+           password: Boolean(PASSWORD), client: latest ? latest.build : null };
+}
+
+// ---------------------------------------------------------------------------
+// client downloads
+
+/** What build.ps1 publish last uploaded ({ build, version }), or null. */
+function latestClient() {
+  try {
+    const raw = fs.readFileSync(path.join(CLIENT_DIR, 'latest.json'), 'utf8').replace(/^﻿/, '');
+    const j = JSON.parse(raw);
+    if (typeof j.build !== 'string' || !j.build) return null;
+    if (!fs.existsSync(path.join(CLIENT_DIR, CLIENT_ZIP))) return null;
+    return { build: j.build, version: typeof j.version === 'string' ? j.version : '' };
+  } catch {
+    return null;
+  }
+}
+
+/** GET /download: the published client zip. Open to anyone who can reach the server. */
+function serveClient(res) {
+  const notFound = () => {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('아직 올라온 클라이언트가 없습니다.');
+  };
+  const latest = latestClient();
+  if (!latest) return notFound();
+  // Size from the opened file itself: publish may swap the zip in meanwhile.
+  fs.open(path.join(CLIENT_DIR, CLIENT_ZIP), 'r', (err, fd) => {
+    if (err) return notFound();
+    fs.fstat(fd, (err2, st) => {
+      if (err2) { fs.close(fd, () => {}); return notFound(); }
+      const name = `pmf-battle-${latest.build.replace(/[^0-9A-Za-z._-]/g, '')}.zip`;
+      res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Content-Length': st.size,
+        'Content-Disposition': `attachment; filename="${name}"`,
+        'Cache-Control': 'no-store',
+      });
+      fs.createReadStream('', { fd }).pipe(res);
+    });
+  });
 }
 
 /** Plain HTTP(S) requests: a tiny status page; the lobby itself is /ws. */
@@ -408,6 +454,7 @@ function onRequest(req, res) {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end('ok');
   }
+  if (req.method === 'GET' && (url === '/download' || url === '/download/')) return serveClient(res);
   if (req.method === 'GET' && (url === '/' || url === '/status')) {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(statusPayload(), null, 2));

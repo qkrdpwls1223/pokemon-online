@@ -90,6 +90,7 @@ final class AppWindow {
     private var users: [LobbyUser] = []
     private var outgoing: (id: String, name: String)?
     private var promptOpen = false
+    private var updateOffered = false
     /// Why the server is about to close us (wrong password, old client...),
     /// shown instead of the generic "disconnected" line.
     private var rejection: String?
@@ -191,7 +192,8 @@ final class AppWindow {
                           + "· 모든 포켓몬은 HP 가득 찬 상태로 싸우고, 공식 세이브는 바뀌지 않습니다.\n"
                           + "· 목록에서 트레이너를 더블클릭해도 대전을 신청할 수 있어요.\n"
                           + "· 공식 프로그램 버전이 다른 상대와는 대전할 수 없습니다.\n"
-                          + "· 서버 주소 예: https://10.10.33.36:7777",
+                          + "· 서버 주소 예: https://10.10.33.36:7777\n"
+                          + "· 새 버전 받기: 서버 주소 뒤에 /download",
                           parent: hwnd, id: 0, x: px(392), y: px(344), w: px(376), h: px(120), font: fontSmall))
 
         _ = add(makeChild("STATIC", "상대 파티", parent: hwnd, id: 0,
@@ -199,7 +201,7 @@ final class AppWindow {
         preview = PartyPreview(parent: hwnd, k: k, x: px(788), y: px(98), w: px(280), h: px(404))
         _ = add(preview?.hwnd)
         _ = add(makeChild("STATIC",
-                          "엔진 \(EngineInfo.upstreamCommit) (공식 \(AppVersion.string) 기준) · 클라이언트 \(ClientInfo.version)",
+                          "엔진 \(EngineInfo.upstreamCommit) (공식 \(AppVersion.string) 기준) · 클라이언트 \(ClientInfo.version) (빌드 \(BuildInfo.id))",
                           parent: hwnd, id: 0, x: px(12), y: px(530), w: px(1056), h: px(18), font: fontSmall))
     }
 
@@ -338,6 +340,7 @@ final class AppWindow {
             if w.name != getText(nameEdit) { setText(nameEdit, w.name) }
             setStatus("접속됨 · \(w.name) 님으로 입장했습니다.")
             refreshLobbyUI()
+            if let latest = w.latestClient, latest.build > BuildInfo.id { offerUpdate(latest) }
 
         case .lobby(let l):
             users = l.users
@@ -402,6 +405,22 @@ final class AppWindow {
         case .pong, .unknown:
             break
         }
+    }
+
+    /// A newer build is published on the server: note it in the status line
+    /// and, once per run, offer to download it in the browser.
+    private func offerUpdate(_ latest: LatestClient) {
+        let url = "\(config.url)/download"
+        setStatus("새 클라이언트가 나왔습니다 (빌드 \(latest.build)) · 받기: \(url)")
+        guard !updateOffered, !promptOpen else { return }
+        updateOffered = true
+        promptOpen = true
+        let ok = askYesNo(hwnd, "새 클라이언트가 나왔습니다 (빌드 \(latest.build)).\n"
+                              + "지금 내려받을까요? 브라우저에서 받아집니다.\n\n"
+                              + "받은 압축을 풀고 이 창을 닫은 뒤 새 pmf-battle.exe를 실행하세요.\n"
+                              + "설정은 그대로 이어집니다.", title: "업데이트")
+        promptOpen = false
+        if ok { openURL(url) }
     }
 
     // MARK: - battle
